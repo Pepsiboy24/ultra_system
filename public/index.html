@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🍵 TeaFlow B2B Command Center</title>
+  <meta name="description" content="Production monitoring dashboard for B2B tea orders, supplier credit lines, and real-time inventory pipeline tracking.">
+  <!-- Google Fonts for Elite Typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="index.css">
+</head>
+<body>
+
+  <!-- Top Glassmorphic Navigation -->
+  <header class="app-header">
+    <div class="header-container">
+      <div class="logo-area">
+        <span class="logo-icon">🍵</span>
+        <div class="logo-text">
+          <h1>TeaFlow</h1>
+          <p class="subtitle">B2B Order Pipeline & Supplier Credit Control</p>
+        </div>
+      </div>
+      
+      <!-- Live Pipeline Stats / Environment Tags -->
+      <div class="system-stats">
+        <div class="stat-badge" id="db-mode-badge">
+          <span class="stat-indicator pulse-green"></span>
+          <span class="badge-label">Database:</span>
+          <span class="badge-value" id="db-mode-value">Loading...</span>
+        </div>
+        <div class="stat-badge" id="ai-mode-badge">
+          <span class="stat-indicator pulse-green"></span>
+          <span class="badge-label">AI Engine:</span>
+          <span class="badge-value" id="ai-mode-value">Loading...</span>
+        </div>
+        <button id="btn-refresh" class="btn-refresh" aria-label="Refresh Dashboard">
+          <svg class="refresh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+          Refresh
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Dashboard Workspace -->
+  <main class="dashboard-grid">
+
+    <!-- LEFT COLUMN: Orders Pipeline -->
+    <section class="dashboard-col left-col">
+      
+      <!-- Active Orders Card -->
+      <div class="glass-card fade-in">
+        <div class="card-header">
+          <div class="header-title-wrapper">
+            <span class="card-icon icon-approved">⚡</span>
+            <h2>Active Orders Queue</h2>
+          </div>
+          <span class="count-badge green-badge" id="active-orders-count">0</span>
+        </div>
+        <div class="card-body scrollable-container">
+          <table class="data-table" id="table-active-orders">
+            <thead>
+              <tr>
+                <th scope="col">Order ID</th>
+                <th scope="col">Supplier</th>
+                <th scope="col">Total Amount</th>
+                <th scope="col">Payment Link</th>
+                <th scope="col">Processed At</th>
+              </tr>
+            </thead>
+            <tbody id="active-orders-list">
+              <!-- Dynamically populated rows -->
+              <tr class="placeholder-row">
+                <td colspan="5" class="placeholder-cell">
+                  <div class="loader-spinner"></div>
+                  <span>Fetching active pipeline orders...</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Order History & Rejections Log Card -->
+      <div class="glass-card fade-in">
+        <div class="card-header">
+          <div class="header-title-wrapper">
+            <span class="card-icon icon-rejected">⚠️</span>
+            <h2>Rejection & Exception Log</h2>
+          </div>
+          <span class="count-badge red-badge" id="rejected-orders-count">0</span>
+        </div>
+        <div class="card-body scrollable-container">
+          <table class="data-table" id="table-rejected-orders">
+            <thead>
+              <tr>
+                <th scope="col">Order ID</th>
+                <th scope="col">Supplier</th>
+                <th scope="col">Requested</th>
+                <th scope="col">Rejection Reason</th>
+                <th scope="col">Logged At</th>
+              </tr>
+            </thead>
+            <tbody id="rejected-orders-list">
+              <!-- Dynamically populated rows -->
+              <tr class="placeholder-row">
+                <td colspan="5" class="placeholder-cell">
+                  <div class="loader-spinner"></div>
+                  <span>Loading transaction log...</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- RIGHT COLUMN: Credit Control Center -->
+    <section class="dashboard-col right-col">
+      
+      <!-- Supplier Credit Control Card -->
+      <div class="glass-card fade-in sticky-card">
+        <div class="card-header">
+          <div class="header-title-wrapper">
+            <span class="card-icon icon-credit">💳</span>
+            <h2>Supplier Credit Control</h2>
+          </div>
+          <span class="count-badge amber-badge" id="supplier-count">0</span>
+        </div>
+        <div class="card-body">
+          <p class="section-desc">Manage credit status and toggle suppliers' ability to place new tea orders on outstanding credit accounts.</p>
+          
+          <div class="supplier-list-wrapper" id="suppliers-list">
+            <!-- Dynamically populated list -->
+            <div class="placeholder-supplier-list">
+              <div class="loader-spinner"></div>
+              <span>Connecting to supplier ledger...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick WhatsApp Order Simulator Card (Bonus Admin Feature) -->
+      <div class="glass-card fade-in">
+        <div class="card-header">
+          <div class="header-title-wrapper">
+            <span class="card-icon icon-chat">💬</span>
+            <h2>Order Pipeline Simulator</h2>
+          </div>
+        </div>
+        <div class="card-body">
+          <p class="section-desc">Simulate an incoming WhatsApp order text from a supplier. Perfect for testing credit-toggle rules instantly.</p>
+          <form id="simulator-form" class="simulator-form">
+            <div class="form-group">
+              <label for="simulation-text">WhatsApp Message Text</label>
+              <textarea id="simulation-text" rows="3" placeholder="Hi! I want to order 10 Earl Grey Blend and 5 Chamomile Fields for Golden Tea Co. please."></textarea>
+            </div>
+            <button type="submit" id="btn-submit-simulation" class="btn-simulate">
+              <span>Send To Pipeline</span>
+              <svg class="send-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </form>
+          
+          <!-- Simulation Status Result -->
+          <div id="simulation-result" class="simulation-result hidden">
+            <!-- Dynamically filled with premium logs of pipeline outputs -->
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Premium Notification Toast Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Dashboard Script (Modern ES Modules) -->
+  <script type="module" src="dashboard.js"></script>
+</body>
+</html>

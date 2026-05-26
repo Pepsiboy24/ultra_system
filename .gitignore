@@ -1,0 +1,32 @@
+# ==============================================================================
+# Production-ready .gitignore for Tea Project
+# ==============================================================================
+
+# 1. Environment and sensitive secret credential files
+.env
+.env.local
+.env.production
+.env.development
+.env.test
+
+# 2. Dependency directories
+node_modules/
+jspm_packages/
+
+# 3. System log files and process diagnostics
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+
+# 4. Operating system files
+.DS_Store
+Thumbs.db
+.Spreadsheet
+.Desktop
+.directory
+Desktop.ini
+
+# 5. Local local-first testing storage state files
+db/mock_db.json
