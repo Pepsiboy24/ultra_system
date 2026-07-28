@@ -16,22 +16,38 @@ const db = require('../config/db');
  * @param {{ supplier_name: string, items: Array<{ product_name: string, quantity: number }> }} parsedOrder
  * @returns {Promise<{ success: boolean, order: Object, items?: Array<Object>, reason?: string }>}
  */
-async function processOrderPipeline(parsedOrder) {
+async function processOrderPipeline(parsedOrder, senderPhone = null) {
   const { supplier_name, items } = parsedOrder;
   console.log(`📦 Pipeline: Processing order for supplier "${supplier_name}" with ${items ? items.length : 0} items...`);
 
   // --- Step 1: Supplier Verification ---
-  const supplier = await db.getSupplierByName(supplier_name);
+  const isUnknownSupplier = !supplier_name || 
+                            supplier_name.toLowerCase() === 'unknown supplier' || 
+                            supplier_name.toLowerCase() === 'unknown' || 
+                            supplier_name.toLowerCase() === 'ambiguous';
+
+  let supplier = null;
+  if (!isUnknownSupplier) {
+    supplier = await db.getSupplierByName(supplier_name);
+  }
+
+  if (!supplier && senderPhone) {
+    console.log(`🔍 Pipeline: Supplier "${supplier_name || 'Unknown'}" not resolved. Falling back to phone number search: "${senderPhone}"`);
+    supplier = await db.getSupplierByPhone(senderPhone);
+  }
+
   if (!supplier) {
-    console.warn(`⚠️ Pipeline Rejected: Supplier "${supplier_name}" not found in database.`);
+    const finalSupplierName = supplier_name || 'Unknown Supplier';
+    console.warn(`⚠️ Pipeline Rejected: Supplier "${finalSupplierName}" not found in database.`);
     return {
       success: false,
-      reason: `Supplier "${supplier_name}" not found.`,
+      reason: `Supplier "${finalSupplierName}" not found.`,
       parsed_data: parsedOrder
     };
   }
 
   console.log(`✅ Supplier Found: ${supplier.name} (Credit Limit: $${supplier.credit_limit}, Balance: $${supplier.outstanding_balance})`);
+
 
   // --- Step 1.5: Credit Request Authorization Check ---
   if (supplier.can_request_credit === false) {

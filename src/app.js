@@ -6,6 +6,7 @@
 require('dotenv').config();
 const express = require('express');
 const orderRoutes = require('./controllers/orderController');
+const whatsappRoutes = require('./controllers/whatsappController');
 const db = require('./config/db');
 const geminiClient = require('./config/gemini');
 
@@ -28,6 +29,7 @@ app.use(express.static('public'));
 
 // Mounting the B2B Pipeline Route
 app.use('/api', orderRoutes);
+app.use('/api/webhook', whatsappRoutes);
 
 // Dashboard API Routes
 app.get('/api/dashboard/orders', async (req, res) => {

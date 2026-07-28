@@ -84,6 +84,39 @@ const db = {
   },
 
   /**
+   * Look up a supplier by contact phone
+   */
+  async getSupplierByPhone(phone) {
+    if (!phone) return null;
+
+    if (!isMock) {
+      // Find matching supplier by contact_phone in Supabase
+      const { data, error } = await supabase
+        .from('suppliers')
+        .select('*')
+        .eq('contact_phone', phone)
+        .limit(1);
+
+      if (error) {
+        console.error('Error fetching supplier by phone from Supabase:', error);
+        return null;
+      }
+      return data && data.length > 0 ? data[0] : null;
+    } else {
+      // Local mock search
+      const data = readMockDb();
+      const cleanPhone = phone.replace(/\D/g, '');
+      const found = data.suppliers.find(s => {
+        if (!s.contact_phone) return false;
+        const cleanContact = s.contact_phone.replace(/\D/g, '');
+        return cleanContact === cleanPhone || s.contact_phone === phone;
+      });
+      return found || null;
+    }
+  },
+
+
+  /**
    * Look up a product by name using case-insensitive partial match
    */
   async getProductByName(name) {
@@ -122,7 +155,7 @@ const db = {
           status_reason,
           total_amount,
           payment_status,
-          payment_link
+          //payment_link
         }])
         .select();
 
@@ -139,7 +172,7 @@ const db = {
         status_reason,
         total_amount: parseFloat(total_amount),
         payment_status,
-        payment_link,
+        //payment_link,
         created_at: new Date().toISOString()
       };
       
@@ -263,7 +296,6 @@ const db = {
           status_reason,
           total_amount,
           payment_status,
-          payment_link,
           created_at,
           suppliers (
             name
