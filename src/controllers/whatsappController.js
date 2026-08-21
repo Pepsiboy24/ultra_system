@@ -10,8 +10,9 @@ const express = require('express');
 const router = express.Router();
 const aiService = require('../services/aiService');
 const orderService = require('../services/orderService');
+const whatsappService = require('../services/whatsappService');
 const db = require('../config/db');
-const geminiClient = require('../config/gemini');
+const mistralClient = require('../config/mistral');
 
 /**
  * GET /api/webhook
@@ -56,7 +57,16 @@ router.post('/', async (req, res) => {
     console.log(`\n[${now}] 📥 Webhook Received:`);
 
     if (!message) {
-      console.log('💡 Info: Webhook event does not contain a message payload (e.g. standard status update/read receipt).');
+      const status = value?.statuses?.[0];
+      if (status) {
+        console.log(`💡 Status Update: message ${status.id} -> "${status.status}" for ${status.recipient_id}`);
+        if (status.status === 'failed' && status.errors) {
+          console.error('❌ WhatsApp Delivery Failed:', JSON.stringify(status.errors, null, 2));
+        }
+      } else {
+        console.log('💡 Info: Webhook event does not contain a message payload (e.g. standard status update/read receipt).');
+        console.log('Raw payload:', JSON.stringify(req.body, null, 2));
+      }
       return res.status(200).json({ success: true, status: 'ignored_no_message' });
     }
 
@@ -99,6 +109,10 @@ router.post('/', async (req, res) => {
       console.log(`⚠️ Failure Reason: "${pipelineResult.reason}"`);
     }
 
+    // 3. Send a WhatsApp reply back to the customer with the order outcome
+    const replyText = whatsappService.buildOrderReplyMessage(pipelineResult);
+    await whatsappService.sendTextMessage(from, replyText);
+
     const responsePayload = {
       success: pipelineResult.success,
       status: pipelineResult.success ? 'processed' : 'rejected',
@@ -114,7 +128,7 @@ router.post('/', async (req, res) => {
       },
       system_metadata: {
         database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-        ai_engine_mode: geminiClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_GEMINI_1_5_FLASH',
+        ai_engine_mode: mistralClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_MISTRAL_SMALL',
         processed_at: new Date().toISOString()
       }
     };

@@ -10,7 +10,7 @@ const router = express.Router();
 const aiService = require('../services/aiService');
 const orderService = require('../services/orderService');
 const db = require('../config/db');
-const geminiClient = require('../config/gemini');
+const mistralClient = require('../config/mistral');
 
 router.post('/process-order', async (req, res) => {
   try {
@@ -59,7 +59,7 @@ router.post('/process-order', async (req, res) => {
       },
       system_metadata: {
         database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-        ai_engine_mode: geminiClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_GEMINI_1_5_FLASH',
+        ai_engine_mode: mistralClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_MISTRAL_SMALL',
         processed_at: new Date().toISOString()
       }
     };

@@ -5,7 +5,7 @@
  * into structured JSON order models.
  */
 
-const geminiClient = require('../config/gemini');
+const mistralClient = require('../config/mistral');
 
 /**
  * Parse an incoming B2B order text message (e.g. from WhatsApp)
@@ -17,7 +17,7 @@ async function parseOrderMessage(message) {
     throw new Error('Invalid message input. Expected a non-empty string.');
   }
   
-  return await geminiClient.parseOrderMessage(message);
+  return await mistralClient.parseOrderMessage(message);
 }
 
 module.exports = {

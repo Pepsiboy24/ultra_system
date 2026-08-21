@@ -8,7 +8,7 @@ const express = require('express');
 const orderRoutes = require('./controllers/orderController');
 const whatsappRoutes = require('./controllers/whatsappController');
 const db = require('./config/db');
-const geminiClient = require('./config/gemini');
+const mistralClient = require('./config/mistral');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -92,7 +92,7 @@ app.get('/', (req, res) => {
     system_configuration: {
       port: PORT,
       database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-      ai_engine_mode: geminiClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_GEMINI_1_5_FLASH'
+      ai_engine_mode: mistralClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_MISTRAL_SMALL'
     },
     quick_start: 'Try sending a POST request to /api/process-order with the text of your tea request!'
   });
@@ -111,7 +111,7 @@ app.listen(PORT, () => {
   console.log('==================================================');
   console.log(`🍵 B2B Tea Order Server Running on http://localhost:${PORT}`);
   console.log(`📡 Database Mode: ${db.isMock ? 'LOCAL_MOCK_JSON (Simulated)' : 'SUPABASE_POSTGRES (Live)'}`);
-  console.log(`🧠 AI Engine Mode: ${geminiClient.isMock ? 'MOCK_HEURISTIC_NLP (Simulated)' : 'GEMINI_1_5_FLASH (Live)'}`);
+  console.log(`🧠 AI Engine Mode: ${mistralClient.isMock ? 'MOCK_HEURISTIC_NLP (Simulated)' : 'MISTRAL_SMALL (Live)'}`);
   console.log('==================================================');
 });
 
