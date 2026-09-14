@@ -10,11 +10,12 @@ const router = express.Router();
 const aiService = require('../services/aiService');
 const orderService = require('../services/orderService');
 const db = require('../config/db');
-const mistralClient = require('../config/mistral');
+const cloudflareClient = require('../config/cloudflare');
 
 router.post('/process-order', async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, businessCategory } = req.body;
+    const category = businessCategory || 'b2b'; // default matches current B2B behavior
 
     if (!message || typeof message !== 'string' || message.trim() === '') {
       return res.status(400).json({
@@ -25,12 +26,13 @@ router.post('/process-order', async (req, res) => {
 
     console.log('\n--- 📥 Incoming B2B WhatsApp Message ---');
     console.log(`"${message}"`);
+    console.log(`🏢 business_category: ${category}`);
     console.log('----------------------------------------');
 
-    // 1. NLP parsing via Gemini AI (or Heuristics fallback)
+    // 1. NLP parsing via AI (or Heuristics fallback)
     let parsedOrder;
     try {
-      parsedOrder = await aiService.parseOrderMessage(message);
+      parsedOrder = await aiService.parseOrderMessage(message, category);
     } catch (aiError) {
       console.error('❌ AI Extraction Error:', aiError.message);
       return res.status(500).json({
@@ -59,7 +61,7 @@ router.post('/process-order', async (req, res) => {
       },
       system_metadata: {
         database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-        ai_engine_mode: mistralClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_MISTRAL_SMALL',
+        ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
         processed_at: new Date().toISOString()
       }
     };

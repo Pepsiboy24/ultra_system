@@ -7,6 +7,7 @@
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
     "seed": "node scripts/seed.js",
+    "seed:placeholder": "node scripts/seed_placeholder.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -19,6 +20,7 @@
     "express": "^4.19.2"
   },
   "devDependencies": {
-    "nodemon": "^3.1.2"
+    "nodemon": "^3.1.2",
+    "wrangler": "^4.131.0"
   }
 }

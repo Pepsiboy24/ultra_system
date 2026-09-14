@@ -112,9 +112,13 @@ Extract:
 Input Message:
 "${message}"
 
+Rules:
+- If the message does NOT clearly mention a supplier or customer name, set "supplier_name" to null.
+- Never output placeholder text such as "Supplier/Customer Name" — treat that field as null instead.
+
 Return JSON matching this exact structure, and nothing else:
 {
-  "supplier_name": "Supplier/Customer Name",
+  "supplier_name": null,
   "items": [
     {
       "product_name": "Standard Tea Name",

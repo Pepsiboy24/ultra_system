@@ -1,0 +1,30 @@
+name = "tea"
+main = "src/worker.js"
+compatibility_date = "2026-09-10"
+compatibility_flags = [
+  "nodejs_compat",
+  "enable_nodejs_http_modules",
+  "enable_nodejs_http_server_modules"
+]
+
+# Non-secret config. APP_BASE_URL finalized after first deploy (used for
+# invoice_url + Monnify redirectUrl). Cron jobs disabled for day one.
+[vars]
+APP_BASE_URL = "https://tea.relayng.workers.dev"
+PORT = "3000"
+MONNIFY_API_URL = "https://sandbox.monnify.com"
+MONNIFY_LIVE = "0"
+REMINDERS_ENABLED = "false"
+SUPPLIER_NUDGES_ENABLED = "false"
+DAILY_SUMMARY_ENABLED = "false"
+
+# Cron Triggers (UTC). Each string is dispatched by src/worker.js
+# scheduled(controller) matching controller.cron against each job's
+# CRON_SCHEDULE: "0 9 * * *" -> reminderService, "0 * * * *" ->
+# supplierResponseTimeout, "* * * * *" -> dailySummaryService.
+[triggers]
+crons = [
+  "0 9 * * *",
+  "0 * * * *",
+  "* * * * *"
+]

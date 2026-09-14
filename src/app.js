@@ -7,13 +7,19 @@ require('dotenv').config();
 const express = require('express');
 const orderRoutes = require('./controllers/orderController');
 const whatsappRoutes = require('./controllers/whatsappController');
+const invoiceRoutes = require('./controllers/invoiceController');
+const paymentWebhookRoutes = require('./controllers/paymentWebhookController');
 const db = require('./config/db');
-const mistralClient = require('./config/mistral');
+const cloudflareClient = require('./config/cloudflare');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Body Parser Middleware
+// Body Parser Middleware.
+// The Monnify webhook is mounted with express.raw() BEFORE express.json() so its
+// signature (HMAC-SHA512 of the exact body bytes) can be verified. express.json()
+// skips the request afterwards because the body is already consumed.
+app.use('/api/payments/webhook', express.raw({ type: '*/*' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -30,11 +36,14 @@ app.use(express.static('public'));
 // Mounting the B2B Pipeline Route
 app.use('/api', orderRoutes);
 app.use('/api/webhook', whatsappRoutes);
+app.use('/api/invoices', invoiceRoutes);
+app.use('/api/payments', paymentWebhookRoutes);
 
 // Dashboard API Routes
 app.get('/api/dashboard/orders', async (req, res) => {
   try {
-    const orders = await db.getAllOrders();
+    // Optional tenant scope: ?clientId=... (null = all tenants, dev dashboard).
+    const orders = await db.getAllOrders(req.query.clientId || null);
     res.status(200).json(orders);
   } catch (error) {
     console.error('Error fetching dashboard orders:', error);
@@ -44,7 +53,7 @@ app.get('/api/dashboard/orders', async (req, res) => {
 
 app.get('/api/dashboard/suppliers', async (req, res) => {
   try {
-    const suppliers = await db.getAllSuppliers();
+    const suppliers = await db.getAllSuppliers(req.query.clientId || null);
     res.status(200).json(suppliers);
   } catch (error) {
     console.error('Error fetching dashboard suppliers:', error);
@@ -61,7 +70,7 @@ app.put('/api/dashboard/suppliers/:id/credit-toggle', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing "can_request_credit" boolean in request body.' });
     }
 
-    const updatedSupplier = await db.toggleSupplierCredit(id, can_request_credit);
+    const updatedSupplier = await db.toggleSupplierCredit(id, can_request_credit, req.query.clientId || null);
     if (!updatedSupplier) {
       return res.status(404).json({ success: false, error: `Supplier with ID ${id} not found.` });
     }
@@ -92,7 +101,7 @@ app.get('/', (req, res) => {
     system_configuration: {
       port: PORT,
       database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-      ai_engine_mode: mistralClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_MISTRAL_SMALL'
+      ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B'
     },
     quick_start: 'Try sending a POST request to /api/process-order with the text of your tea request!'
   });
@@ -106,13 +115,19 @@ app.use((req, res) => {
   });
 });
 
-// Start listening
-app.listen(PORT, () => {
-  console.log('==================================================');
-  console.log(`🍵 B2B Tea Order Server Running on http://localhost:${PORT}`);
-  console.log(`📡 Database Mode: ${db.isMock ? 'LOCAL_MOCK_JSON (Simulated)' : 'SUPABASE_POSTGRES (Live)'}`);
-  console.log(`🧠 AI Engine Mode: ${mistralClient.isMock ? 'MOCK_HEURISTIC_NLP (Simulated)' : 'MISTRAL_SMALL (Live)'}`);
-  console.log('==================================================');
-});
+// Start listening.
+// Under Cloudflare Workers (src/worker.js) the app is bound by
+// httpServerHandler({ port }) instead, which routes incoming requests to the
+// Express server that listens on the same port internally. Setting
+// WORKER_RUNTIME=1 is handled by the worker entry before this module loads.
+if (process.env.WORKER_RUNTIME !== '1') {
+  app.listen(PORT, () => {
+    console.log('==================================================');
+    console.log(`🍵 B2B Tea Order Server Running on http://localhost:${PORT}`);
+    console.log(`📡 Database Mode: ${db.isMock ? 'LOCAL_MOCK_JSON (Simulated)' : 'SUPABASE_POSTGRES (Live)'}`);
+    console.log(`🧠 AI Engine Mode: ${cloudflareClient.isMock ? 'MOCK_HEURISTIC_NLP (Simulated)' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B (Live)'}`);
+    console.log('==================================================');
+  });
+}
 
 module.exports = app;
