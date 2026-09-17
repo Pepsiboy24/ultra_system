@@ -157,6 +157,19 @@ CREATE TABLE conversations (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 7. Create Leads Table
+-- Early-access signups captured by the Relay landing page (POST /api/leads).
+-- Internal-only, written exclusively via the service_role key (bypasses RLS) —
+-- no user-facing policies are added, mirroring conversations/clients.
+CREATE TABLE leads (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    business_name TEXT NOT NULL,
+    whatsapp_number TEXT NOT NULL,
+    business_category TEXT NOT NULL CHECK (business_category IN ('dropshipper', 'restaurant', 'b2b')),
+    email TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Indexes for performance & quick queries
 CREATE INDEX idx_clients_whatsapp_number ON clients (whatsapp_number);
 CREATE INDEX idx_suppliers_client_id ON suppliers (client_id);
@@ -167,6 +180,7 @@ CREATE INDEX idx_orders_client_id ON orders (client_id);
 CREATE INDEX idx_orders_supplier_id ON orders (supplier_id);
 CREATE INDEX idx_order_items_order_id ON order_items (order_id);
 CREATE INDEX idx_conversations_customer_phone ON conversations (customer_phone);
+CREATE INDEX idx_leads_whatsapp_number ON leads (whatsapp_number);
 
 -- Enable Row Level Security (RLS)
 ALTER TABLE suppliers ENABLE ROW LEVEL SECURITY;
@@ -181,6 +195,10 @@ ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 -- Clients is also internal-only (tenant metadata), accessed only via the
 -- service_role key — no client-facing policies are added.
 ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
+
+-- Leads is internal-only (marketing signups), accessed only via the
+-- service_role key — no client-facing policies are added.
+ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
 
 -- ----------------------------------------------------
 -- RLS POLICIES FOR SECURE CLIENT-SIDE / THIRD-PARTY ACCESS

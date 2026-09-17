@@ -1242,6 +1242,54 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
   },
 
   /**
+   * Capture an early-access lead from the Relay landing page (POST /api/leads).
+   * Internal-only marketing data, written with the service_role key.
+   * whatsapp_number is stored digits-only, mirroring createClient.
+   */
+  async createLead({ business_name, whatsapp_number, business_category = 'b2b', email }) {
+    if (!business_name) throw new Error('createLead requires business_name.');
+    if (!whatsapp_number) throw new Error('createLead requires whatsapp_number.');
+    const whatsappNumber = String(whatsapp_number).replace(/\D/g, '');
+
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('leads')
+        .insert([{
+          business_name,
+          whatsapp_number: whatsappNumber,
+          business_category,
+          email
+        }])
+        .select();
+
+      if (error) {
+        throw new Error(`Failed to create lead in Supabase: ${error.message}`);
+      }
+      return data[0];
+    } else {
+      const data = readMockDb();
+      const leads = data.leads || [];
+      let id = `lead-${String(leads.length + 1).padStart(3, '0')}`;
+      while (leads.some(l => l.id === id)) {
+        const n = Number(id.replace('lead-', '')) + 1;
+        id = `lead-${String(n).padStart(3, '0')}`;
+      }
+      const lead = {
+        id,
+        business_name,
+        whatsapp_number: whatsappNumber,
+        business_category,
+        email,
+        created_at: new Date().toISOString()
+      };
+      leads.push(lead);
+      data.leads = leads;
+      writeMockDb(data);
+      return lead;
+    }
+  },
+
+  /**
    * Resolve the id of the per-client "Unknown Supplier" audit placeholder.
    * Every tenant gets its own placeholder row (created at onboarding via
    * createPlaceholderSupplier) so rejected orders stay scoped to that tenant.

@@ -9,6 +9,8 @@ const orderRoutes = require('./controllers/orderController');
 const whatsappRoutes = require('./controllers/whatsappController');
 const invoiceRoutes = require('./controllers/invoiceController');
 const paymentWebhookRoutes = require('./controllers/paymentWebhookController');
+const landingRoutes = require('./controllers/landingController');
+const leadRoutes = require('./controllers/leadController');
 const db = require('./config/db');
 const cloudflareClient = require('./config/cloudflare');
 
@@ -30,6 +32,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Landing page (marketing site) — served before express.static() so the
+// root '/' and '/privacy-policy' routes return the Worker-safe HTML even if
+// the old public/ dashboard happens to exist on disk.
+app.use('/', landingRoutes);
+
 // Serve static files from the 'public' directory
 app.use(express.static('public'));
 
@@ -38,6 +45,7 @@ app.use('/api', orderRoutes);
 app.use('/api/webhook', whatsappRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/payments', paymentWebhookRoutes);
+app.use('/api/leads', leadRoutes);
 
 // Dashboard API Routes
 app.get('/api/dashboard/orders', async (req, res) => {
@@ -83,8 +91,9 @@ app.put('/api/dashboard/suppliers/:id/credit-toggle', async (req, res) => {
   }
 });
 
-// Root Descriptive Route - Beautiful Server landing status
-app.get('/', (req, res) => {
+// Diagnostics Status Route (was the old JSON response at '/', now moved to
+// /api/status so the root serves the Relay landing page).
+app.get('/api/status', (req, res) => {
   res.status(200).json({
     name: 'B2B Tea Business Order Pipeline API',
     description: 'Processes incoming supplier WhatsApp order messages, validates inventory, verifies credit limits, and issues secure payment links.',
