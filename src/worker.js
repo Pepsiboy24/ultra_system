@@ -39,6 +39,7 @@ const { default: app } = await import('./app.js');
 const { default: reminderService } = await import('./services/reminderService.js');
 const { default: supplierResponseTimeout } = await import('./services/supplierResponseTimeout.js');
 const { default: dailySummaryService } = await import('./services/dailySummaryService.js');
+const { default: menuResetService } = await import('./services/menuResetService.js');
 
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT);
@@ -71,6 +72,13 @@ async function runScheduled(controller) {
         return;
       }
       await dailySummaryService.runDailySummaryJob(triggerTime);
+      break;
+    case menuResetService.CRON_SCHEDULE:
+      if (process.env.RESTAURANT_MENU_RESET_ENABLED === 'false') {
+        console.log('🍽️ Restaurant menu-reset job skipped (RESTAURANT_MENU_RESET_ENABLED=false).');
+        return;
+      }
+      await menuResetService.runMenuResetJob(triggerTime);
       break;
     default:
       console.error(`❌ No job mapped for cron schedule "${controller.cron}".`);

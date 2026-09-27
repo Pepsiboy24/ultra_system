@@ -17,14 +17,17 @@ MONNIFY_LIVE = "0"
 REMINDERS_ENABLED = "false"
 SUPPLIER_NUDGES_ENABLED = "false"
 DAILY_SUMMARY_ENABLED = "false"
+RESTAURANT_MENU_RESET_ENABLED = "false"
 
 # Cron Triggers (UTC). Each string is dispatched by src/worker.js
 # scheduled(controller) matching controller.cron against each job's
 # CRON_SCHEDULE: "0 9 * * *" -> reminderService, "0 * * * *" ->
-# supplierResponseTimeout, "* * * * *" -> dailySummaryService.
+# supplierResponseTimeout, "* * * * *" -> dailySummaryService,
+# "0 3 * * *" -> menuResetService (restaurant menu availability).
 [triggers]
 crons = [
   "0 9 * * *",
   "0 * * * *",
-  "* * * * *"
+  "* * * * *",
+  "0 3 * * *"
 ]

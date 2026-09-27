@@ -94,6 +94,11 @@ const seedClients = [
     whatsapp_number: '2348000000001',
     business_category: 'b2b',
     operations_contact_phone: '2348111111111',
+    // Restaurant-flow toggles (irrelevant for b2b, but kept parity with
+    // db/schema.sql defaults so INSERTs work before the column exists).
+    offers_delivery: true,
+    offers_pickup: true,
+    accepting_orders: true,
     // Payment routing fields; populated by scripts/onboardClient.js when a
     // client is onboarded with settlement bank details (Monnify sub-account).
     settlement_account_number: null,
@@ -102,6 +107,37 @@ const seedClients = [
     monnify_subaccount_code: null
   }
 ];
+
+// Demo RESTAURANT tenant exercising the parallel restaurant flow
+// (restaurantService). Whatsaap in/out ride the same bot; merchant commands
+// (OUT/IN/CLOSED/OPEN/READY) go to operations_contact_phone.
+const restaurantSeedClient = {
+  business_name: 'Suhas Kitchen',
+  whatsapp_number: '2348000000002',
+  business_category: 'restaurant',
+  operations_contact_phone: '2348222222222',
+  offers_delivery: true,
+  offers_pickup: true,
+  accepting_orders: true,
+  settlement_account_number: null,
+  settlement_bank_code: null,
+  settlement_email: null,
+  monnify_subaccount_code: null
+};
+
+// Restaurant menu (is_available defaults to true; the daily menu-reset cron
+// job returns anything OUT'd to available again). Prices in Naira.
+const seedRestaurantMenu = [
+  { name: 'Jollof Rice + Grilled Chicken', sku: 'SK-JR-01', price: 3500.00, category: 'Rice & Mains' },
+  { name: 'Fried Rice + Chicken', sku: 'SK-FR-02', price: 3500.00, category: 'Rice & Mains' },
+  { name: 'White Rice + Beef Stew', sku: 'SK-WR-03', price: 3000.00, category: 'Rice & Mains' },
+  { name: 'Peppered Snail', sku: 'SK-PS-04', price: 1200.00, category: 'Small Chops' },
+  { name: 'Zobo (large)', sku: 'SK-ZB-05', price: 500.00, category: 'Drinks' }
+];
+
+// Every restaurant client also gets its own "Unknown Supplier" audit
+// placeholder (orders.supplier_id is NOT NULL), distinct from the b2b client's.
+const RESTAURANT_PLACEHOLDER_ID = '00000000-0000-4000-8000-000000000002';
 
 function isSupabaseConfigured() {
   const url = process.env.SUPABASE_URL;
@@ -207,6 +243,35 @@ async function seedRealSupabase() {
       throw new Error(`Failed to seed products: ${prodError.message}`);
     }
     console.log(`✅ Successfully seeded ${products.length} products.`);
+
+    console.log('🍽️ Seeding restaurant demo client...');
+    const { data: restClients, error: restClientError } = await supabase
+      .from('clients')
+      .insert([restaurantSeedClient])
+      .select();
+    if (restClientError) {
+      throw new Error(`Failed to seed restaurant client: ${restClientError.message}`);
+    }
+    const restClientId = restClients[0].id;
+    console.log(`✅ Seeded restaurant client "${restClients[0].business_name}" (${restClients[0].business_category}) -> client_id ${restClientId}`);
+
+    console.log('🌱 Seeding restaurant placeholder supplier...');
+    const { error: restPhError } = await supabase
+      .from('suppliers')
+      .insert([{ ...placeholderSupplier, id: RESTAURANT_PLACEHOLDER_ID, client_id: restClientId }]);
+    if (restPhError) {
+      throw new Error(`Failed to seed restaurant placeholder supplier: ${restPhError.message}`);
+    }
+
+    console.log('🌱 Seeding restaurant menu...');
+    const { data: restaurantProducts, error: restMenuError } = await supabase
+      .from('products')
+      .insert(seedRestaurantMenu.map(p => ({ ...p, client_id: restClientId })))
+      .select();
+    if (restMenuError) {
+      throw new Error(`Failed to seed restaurant menu: ${restMenuError.message}`);
+    }
+    console.log(`✅ Successfully seeded ${restaurantProducts.length} restaurant menu items.`);
   }
 
   console.log('🎉 Supabase Database Seeded Successfully!');
@@ -243,19 +308,41 @@ function seedMockDatabase() {
     created_at: new Date().toISOString()
   }));
 
+  // Demo restaurant tenant: own client, own menu and own placeholder supplier.
+  const mockRestaurantClient = {
+    id: 'cli-002',
+    ...restaurantSeedClient,
+    created_at: new Date().toISOString()
+  };
+  const MOCK_RESTAURANT_ID = mockRestaurantClient.id;
+
+  const mockRestaurantProducts = seedRestaurantMenu.map((p, idx) => ({
+    id: `rst-prod-${String(idx + 1).padStart(3, '0')}`,
+    client_id: MOCK_RESTAURANT_ID,
+    ...p,
+    created_at: new Date().toISOString()
+  }));
+
   mockSuppliers.push({
     ...placeholderSupplier,
     client_id: MOCK_CLIENT_ID,
     created_at: new Date().toISOString()
   });
+  mockSuppliers.push({
+    ...placeholderSupplier,
+    id: RESTAURANT_PLACEHOLDER_ID,
+    client_id: MOCK_RESTAURANT_ID,
+    created_at: new Date().toISOString()
+  });
 
   const mockDb = {
     suppliers: mockSuppliers,
-    products: mockProducts,
+    products: [...mockProducts, ...mockRestaurantProducts],
     orders: [],
     order_items: [],
     conversations: [],
-    clients: mockClients
+    clients: [mockClients[0], mockRestaurantClient],
+    processed_messages: []
   };
 
   const dbPath = path.join(mockDir, 'mock_db.json');
@@ -263,7 +350,7 @@ function seedMockDatabase() {
   
   console.log(`✅ Successfully created local mock database at: ${dbPath}`);
   console.log(`🌱 Seeded ${mockSuppliers.length} mock suppliers.`);
-  console.log(`🌱 Seeded ${mockProducts.length} mock products.`);
+  console.log(`🌱 Seeded ${mockProducts.length} mock b2b products + ${mockRestaurantProducts.length} mock restaurant menu items.`);
   console.log('🎉 Mock Database Seeded Successfully!');
 }
 

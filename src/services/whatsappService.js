@@ -387,8 +387,386 @@ function buildOrderProgressMessage({ orderId }) {
   );
 }
 
+/**
+ * Send a WhatsApp interactive reply-button message (Confirm/Cancel,
+ * Delivery/Pickup, etc.). Uses the same Graph API call pattern as
+ * sendTextMessage. At most 3 buttons, each title <= 20 chars.
+ *
+ * @param {string} to - Recipient phone (no '+')
+ * @param {string} body - Interactive message body text
+ * @param {Array<{ id: string, title: string }>} buttons - Reply buttons
+ * @param {string} [footer] - Optional footer text
+ * @returns {Promise<Object>} Same shape as sendTextMessage
+ */
+async function sendInteractiveButtons(to, body, buttons, footer) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+
+  if (!phoneNumberId || !accessToken) {
+    console.error('❌ WhatsApp Send Error: Missing WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN in .env');
+    return { success: false, error: 'missing_credentials' };
+  }
+
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'interactive',
+    interactive: {
+      type: 'button',
+      body: { text: body },
+      action: {
+        buttons: (buttons || []).map(b => ({
+          type: 'reply',
+          reply: { id: b.id, title: b.title }
+        }))
+      }
+    }
+  };
+  if (footer) {
+    payload.interactive.footer = { text: footer };
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error('❌ WhatsApp Interactive Send Failed:', JSON.stringify(data, null, 2));
+      return { success: false, error: data };
+    }
+
+    console.log(`📤 WhatsApp Interactive Sent to ${to}: "${body.slice(0, 80)}${body.length > 80 ? '...' : ''}"`);
+    return { success: true, data };
+  } catch (err) {
+    console.error('❌ WhatsApp Interactive Send Exception:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Send the Confirm/Cancel button prompt for a held restaurant order.
+ * @param {string} to
+ * @param {string} body - Order summary (buildRestaurantConfirmBody)
+ * @returns {Promise<Object>}
+ */
+async function sendConfirmCancelPrompt(to, body) {
+  return sendInteractiveButtons(
+    to,
+    body,
+    [
+      { id: 'confirm', title: 'Confirm' },
+      { id: 'cancel', title: 'Cancel' }
+    ],
+    'Tap Confirm or Cancel.'
+  );
+}
+
+/**
+ * Send the Delivery/Pickup prompt for a restaurant order. The button set only
+ * includes the options the client offers (offers_delivery / offers_pickup).
+ * When exactly one option is offered the caller should skip this and proceed
+ * directly — see restaurantService.chooseFulfillment.
+ *
+ * @param {string} to
+ * @param {string} body
+ * @param {{ offers_delivery: boolean, offers_pickup: boolean }} options
+ * @returns {Promise<Object>}
+ */
+async function sendFulfillmentPrompt(to, body, { offers_delivery, offers_pickup }) {
+  const buttons = [];
+  if (offers_delivery) buttons.push({ id: 'delivery', title: 'Delivery' });
+  if (offers_pickup) buttons.push({ id: 'pickup', title: 'Pickup' });
+  if (buttons.length === 0) return { success: false, error: 'no_fulfillment_options' };
+  return sendInteractiveButtons(to, body, buttons, 'How would you like to receive your order?');
+}
+
+/**
+ * Send a location request to a restaurant customer. The WhatsApp Cloud API has
+ * no built-in "request location" message type (only location SHARING), so this
+ * is a plain text prompt that accepts both a shared location pin and a typed
+ * text address — see restaurantService.
+ * @param {string} to
+ * @param {string} body
+ * @returns {Promise<Object>}
+ */
+async function sendLocationRequest(to, body) {
+  return sendTextMessage(to, body);
+}
+
+/**
+ * Format a restaurant order's items for display (quantity x name + modifiers).
+ * @param {Array<Object>} items - [{ product_name, quantity, modifiers? }]
+ * @returns {string}
+ */
+function formatRestaurantItems(items) {
+  return (items || [])
+    .map(item => {
+      const name = item.product_name || item.item_name;
+      const mods = Array.isArray(item.modifiers) && item.modifiers.length
+        ? ` (${item.modifiers.join(', ')})`
+        : '';
+      return `${item.quantity}x ${name}${mods}`;
+    })
+    .join('\n');
+}
+
+/**
+ * Build the confirmation prompt body for a held restaurant order
+ * (customer-facing, sent alongside the Confirm/Cancel buttons).
+ * @param {Object} pending - { items, total_amount }
+ * @returns {string}
+ */
+function buildRestaurantConfirmBody(pending) {
+  return (
+    `📋 Please confirm your order:\n\n` +
+    `${formatRestaurantItems(pending.items)}\n\n` +
+    `Total: ₦${Number(pending.total_amount).toFixed(2)}`
+  );
+}
+
+/**
+ * Build the kitchen/ops notification sent to a restaurant client's
+ * operations_contact_phone after the customer completes the order (fulfillment
+ * + location). Notification only — the ops contact answers with the READY
+ * <short> command once the order is ready.
+ *
+ * @param {Object} params
+ * @param {Object} params.order - Created order row ({ id, total_amount, order_type, delivery_location })
+ * @param {Array<Object>} params.items - Validated items
+ * @param {number} params.total_amount
+ * @param {string} params.etaRange - e.g. '20-25' minutes
+ * @returns {string}
+ */
+function buildRestaurantTicketMessage({ order, items, total_amount, etaRange }) {
+  const shortId = String(order.id).slice(0, 8).toUpperCase();
+  const typeLabel = order.order_type === 'pickup' ? 'PICKUP' : 'DELIVERY';
+  const lines = [
+    `👨🍳 NEW ORDER #${shortId} (${order.id})`,
+    `Please prepare the following:\n\n${formatRestaurantItems(items)}`,
+    `Total: ₦${Number(total_amount).toFixed(2)}`,
+    `Type: ${typeLabel}`
+  ];
+  if (order.order_type === 'delivery' && order.delivery_location) {
+    lines.push(`Delivery: ${order.delivery_location}`);
+  }
+  lines.push(`ETA: about ${etaRange} minutes`);
+  lines.push(`Reply READY ${shortId} once it's ready.`);
+  return lines.join('\n');
+}
+
+/**
+ * Build the customer-facing ETA message after their restaurant order is
+ * confirmed (fulfillment + location complete). Payment deliberately absent —
+ * the restaurant payment model is undecided (see restaurant-flow TODO).
+ *
+ * @param {Object} params
+ * @param {Object} params.order - Created order row
+ * @param {Array<Object>} params.items
+ * @param {number} params.total_amount
+ * @param {string} params.etaRange - e.g. '20-25' minutes
+ * @returns {string}
+ */
+function buildRestaurantEtaMessage({ order, items, total_amount, etaRange }) {
+  const shortId = String(order.id).slice(0, 8).toUpperCase();
+  return (
+    `✅ Order confirmed! (Order #${shortId})\n\n` +
+    `${formatRestaurantItems(items)}\n\n` +
+    `Total: ₦${Number(total_amount).toFixed(2)}\n` +
+    `🕐 Ready in about ${etaRange} minutes.\n` +
+    (order.order_type === 'delivery'
+      ? `🛵 Your order is on the way to you.\n`
+      : `🏃 We'll let you know when it's ready for pickup.`)
+  );
+}
+
+/**
+ * Build the customer-facing message when the merchant marks a restaurant order
+ * ready (READY <short>): "ready for pickup" vs "out for delivery".
+ *
+ * @param {Object} params
+ * @param {string} params.orderId
+ * @param {string} params.orderType - 'delivery' | 'pickup'
+ * @returns {string}
+ */
+function buildRestaurantReadyMessage({ orderId, orderType }) {
+  const shortId = String(orderId).slice(0, 8).toUpperCase();
+  return orderType === 'delivery'
+    ? `🛵 Your order #${shortId} is out for delivery! Enjoy.`
+    : `🎉 Your order #${shortId} is ready for pickup! Come and get it.`;
+}
+
+/**
+ * Shorten a restaurant menu name for use as an interactive button title
+ * (WhatsApp caps button titles at 20 characters). Breaks at a word boundary
+ * and appends an ellipsis when truncation is needed.
+ * @param {string} name
+ * @returns {string}
+ */
+function shortRestaurantButtonTitle(name) {
+  const s = String(name || '').trim();
+  if (s.length <= 20) return s;
+  const cut = s.slice(0, 21).replace(/\s+\S*$/, '').replace(/[+\-_,.&\s]+$/, '').trim();
+  if (!cut) return `${s.slice(0, 19)}…`;
+  return `${cut}…`;
+}
+
+/**
+ * Send the resolution prompt for a restaurant item the customer needs to
+ * disambiguate (ambiguous term) or choose an alternative for (no_match). The
+ * button set is exactly the specific options the upstream want answered, each
+ * id being a real product id (which whatsappController extracts back as
+ * buttonReply), so the follow-up can resolve against those options only.
+ * WhatsApp allows at most 3 buttons, so options are capped at 3 upstream.
+ *
+ * @param {string} to
+ * @param {string} body - Build via buildUnresolvedAsk
+ * @param {Array<{ id: string, name: string, price: number }>} options
+ * @returns {Promise<Object>}
+ */
+async function sendResolvePrompt(to, body, options) {
+  const buttons = (options || []).slice(0, 3).map(o => ({
+    id: String(o.id),
+    title: shortRestaurantButtonTitle(o.name)
+  }));
+  if (buttons.length === 0) return { success: false, error: 'no_resolve_options' };
+  return sendInteractiveButtons(to, body, buttons, 'Tap to choose, or type your answer.');
+}
+
+/**
+ * Build the customer-facing body for a menu-item resolution question. Used
+ * when an ordered term is either ambiguous (several menu items match) or has
+ * no exact menu match (the shop suggests alternatives). Includes what is held
+ * so far (matched items that will merge once resolution completes) so the
+ * customer always sees the running order — resolution never silently resets it.
+ *
+ * @param {Object} params
+ * @param {Array<Object>} params.heldItems - Items already resolved/held
+ * @param {Object} params.unresolved - { kind:'ambiguous'|'no_match', term,
+ *   quantity, options:[{ id, name, price }] }
+ * @returns {string}
+ */
+function buildUnresolvedAsk({ heldItems, unresolved }) {
+  const heldHeader = Array.isArray(heldItems) && heldItems.length
+    ? `📝 Here's what we have so far:\n${formatRestaurantItems(heldItems)}\n\n`
+    : '';
+  const options = (unresolved.options || [])
+    .map((o, i) => `${i + 1}. ${o.name} — ₦${Number(o.price).toFixed(2)}`)
+    .join('\n');
+  const guidance = `\n\nTip: tap an option below, or type the dish you'd like.`;
+  if (unresolved.kind === 'no_match') {
+    return `${heldHeader}❌ We couldn't find "${unresolved.term}" on our menu. Did you mean one of these?\n\n${options}${guidance}`;
+  }
+  return `${heldHeader}🤔 "${unresolved.term}" could be a few different dishes. Which one did you mean?\n\n${options}${guidance}`;
+}
+
+/**
+ * Short acknowledgement that items were added to the held order mid-resolution
+ * (before the next unresolved question is asked). The FULL re-shown summary
+ * comes once everything resolves (Confirm/Cancel prompt).
+ *
+ * @param {Object} params
+ * @param {Array<Object>} params.addedItems - Items merged this round
+ * @returns {string}
+ */
+function buildResolveProgressMessage({ addedItems }) {
+  return `✅ Got it! Added to your order:\n${formatRestaurantItems(addedItems)}`;
+}
+
+/**
+ * Acknowledge a resolution reply that was itself a fresh list of items that
+ * merged into the held order (never a fresh order replacement). Full summary
+ * with Confirm/Cancel follows once no other terms are still pending.
+ *
+ * @param {Object} params
+ * @param {Array<Object>} params.items - Updated merged items
+ * @returns {string}
+ */
+function buildFreshResolveMessage({ items }) {
+  return `📝 OK — here's your updated order:\n${formatRestaurantItems(items)}`;
+}
+
+/**
+ * Re-ask the resolution question for the current unresolved item, used when a
+ * text reply matched none of the specific shown options (or matched several —
+ * the shop never silently guesses, so the customer is asked again).
+ *
+ * @param {Object} params
+ * @param {Object} params.unresolved - { kind, term, options }
+ * @returns {string}
+ */
+function buildResolveReaskMessage({ unresolved }) {
+  const options = (unresolved.options || [])
+    .map((o, i) => `${i + 1}. ${o.name}`)
+    .join('\n');
+  return `Sorry, I didn't catch that. Please pick one of:\n\n${options}`;
+}
+
+/**
+ * Re-prompt confirm/cancel for a held restaurant order, RE-INCLUDING the full
+ * order summary. Used by the text fallback in the confirm stage (customers who
+ * type instead of tapping): the summary must be in front of them again, never
+ * a bare "YES or NO" line.
+ *
+ * @param {Object} pending - { items, total_amount }
+ * @returns {string}
+ */
+function buildConfirmReaskWithContext(pending) {
+  return (
+    `📋 Here's your order again:\n\n` +
+    `${formatRestaurantItems(pending.items)}\n\n` +
+    `Total: ₦${Number(pending.total_amount).toFixed(2)}\n\n` +
+    `Reply YES to confirm or NO to cancel.`
+  );
+}
+
+/**
+ * Polite "not currently accepting orders" reply (accepting_orders = false).
+ * @returns {string}
+ */
+function buildNotAcceptingOrdersMessage() {
+  return `🙏 Thanks for reaching out! We're not currently accepting orders, but please try again soon.`;
+}
+
+/**
+ * Reply when a restaurant customer's message can't be matched to any menu
+ * item. Shows a few available examples to steer them back on menu.
+ *
+ * @param {Array<Object>} menu - Client menu products
+ * @returns {string}
+ */
+function buildMenuNoMatchMessage(menu) {
+  const examples = (menu || [])
+    .filter(m => m.is_available !== false)
+    .slice(0, 4)
+    .map(m => `• ${m.name} — ₦${Number(m.price).toFixed(2)}`)
+    .join('\n');
+  const suffix = examples ? `\n\nSome of our dishes:\n${examples}` : '';
+  return `❌ Sorry, we couldn't match that to our menu. Please order something from it.${suffix}`;
+}
+
 module.exports = {
   sendTextMessage,
+  sendInteractiveButtons,
+  sendConfirmCancelPrompt,
+  sendFulfillmentPrompt,
+  sendLocationRequest,
+  sendResolvePrompt,
+  buildUnresolvedAsk,
+  buildResolveProgressMessage,
+  buildFreshResolveMessage,
+  buildResolveReaskMessage,
+  buildConfirmReaskWithContext,
   buildPendingConfirmationMessage,
   buildOrderReplyMessage,
   buildOpsTicketMessage,
@@ -398,5 +776,12 @@ module.exports = {
   buildSellerReadyPrompt,
   buildOrderReadyMessage,
   buildOrderProgressMessage,
-  buildPaymentConfirmationMessage
+  buildPaymentConfirmationMessage,
+  formatRestaurantItems,
+  buildRestaurantConfirmBody,
+  buildRestaurantTicketMessage,
+  buildRestaurantEtaMessage,
+  buildRestaurantReadyMessage,
+  buildNotAcceptingOrdersMessage,
+  buildMenuNoMatchMessage
 };

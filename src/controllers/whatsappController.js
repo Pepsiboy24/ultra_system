@@ -10,6 +10,7 @@ const express = require('express');
 const router = express.Router();
 const aiService = require('../services/aiService');
 const orderService = require('../services/orderService');
+const restaurantService = require('../services/restaurantService');
 const whatsappService = require('../services/whatsappService');
 const db = require('../config/db');
 const cloudflareClient = require('../config/cloudflare');
@@ -70,18 +71,33 @@ router.post('/', async (req, res) => {
       return res.status(200).json({ success: true, status: 'ignored_no_message' });
     }
 
+    // DEDUP: drop any message whose id we have already seen (Meta redelivery,
+    // retries, or a duplicate request). Inserted right after the status-only
+    // fast path so duplicate event-loop trips never reach the pipelines below.
+    if (message.id) {
+      if (await db.hasProcessedMessage(message.id)) {
+        console.log(`♻️ Dedup: message ${message.id} already processed — skipping.`);
+        return res.status(200).json({ success: true, status: 'duplicate_message_skipped' });
+      }
+      // Mark once real processing begins, before any branching below.
+      await db.markMessageProcessed(message.id);
+    }
+
     const from = message.from;
+    const messageType = message.type;
     const textBody = message.text?.body;
+    // Button replies (Confirm/Cancel/Delivery/Pickup) and shared location pins
+    // arrive as their own message types — extracted so the restaurant flow can
+    // honor them without disturbing the text-only B2B path below.
+    const buttonReply = message.interactive && message.interactive.type === 'button_reply'
+      ? message.interactive.button_reply
+      : null;
+    const location = message.location || null;
 
     console.log('==================================================');
     console.log(`📱 WHATSAPP MESSAGE RECEIVED FROM: ${from}`);
     console.log(`💬 MESSAGE CONTENT: "${textBody || '[Non-text message]'}"`);
     console.log('==================================================');
-
-    if (!textBody || typeof textBody !== 'string' || textBody.trim() === '') {
-      console.log('💡 Info: Text content is empty or invalid. Skipping pipeline execution.');
-      return res.status(200).json({ success: true, status: 'ignored_empty_text' });
-    }
 
     // Resolve the tenant (client) from the business line BEFORE anything else so
     // every downstream branch (supplier reply, customer confirm, fresh order) is
@@ -90,6 +106,45 @@ router.post('/', async (req, res) => {
     const client = businessPhone ? await db.getClientByPhone(businessPhone) : null;
     const businessCategory = client ? client.business_category : undefined;
     console.log(`🏢 Business category: ${businessCategory || 'n/a (generic fallback)'} (business number: ${businessPhone || 'unspecified'}, resolved client: ${client?.business_name || 'none'})`);
+
+    // RESTAURANT FLOW: clients with business_category = 'restaurant' go through
+    // restaurantService's parallel state machine (menu-based AI match with exact
+    // product-id verification server-side, Confirm/Cancel buttons, fulfillment
+    // choice, delivery location, merchant commands, kitchen/ops notification and
+    // queue-aware ETA). It handles text, interactive button_reply, and location
+    // messages and NEVER touches the B2B pipeline below.
+    if (businessCategory === 'restaurant') {
+      const conversation = await db.getConversationState(from);
+      const rResult = await restaurantService.handleRestaurantMessage({
+        from,
+        client,
+        conversation,
+        messageType,
+        text: textBody,
+        buttonReply,
+        location
+      });
+      console.log(`🍽️ Restaurant flow [${rResult.status}] from ${from}.`);
+      return res.status(200).json({
+        success: true,
+        status: rResult.status,
+        sender: from,
+        reply: rResult.reply || null,
+        detail: rResult.detail || null,
+        system_metadata: {
+          database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
+          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+          business_category: 'restaurant',
+          processed_at: new Date().toISOString()
+        }
+      });
+    }
+
+    // ---- B2B / dropshipper / seller flows (unchanged) ----
+    if (!textBody || typeof textBody !== 'string' || textBody.trim() === '') {
+      console.log('💡 Info: Text content is empty or invalid. Skipping pipeline execution.');
+      return res.status(200).json({ success: true, status: 'ignored_empty_text' });
+    }
 
     // DISAMBIGUATION RULE 0 (SELLER commands): before anything else, check the
     // "READY <short>" and "PROGRESS <short>" text commands from the client's

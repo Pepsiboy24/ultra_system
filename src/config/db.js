@@ -349,7 +349,7 @@ const db = {
   /**
    * Create a new order record (scoped to a client via client_id).
    */
-  async createOrder({ client_id, supplier_id, status, status_reason = null, total_amount, payment_status = 'pending', payment_link = null, invoice_url = null, business_name = null, delivery_location = null, payment_terms = null, customer_phone = null }) {
+  async createOrder({ client_id, supplier_id, status, status_reason = null, total_amount, payment_status = 'pending', payment_link = null, invoice_url = null, business_name = null, delivery_location = null, payment_terms = null, customer_phone = null, order_type = null }) {
     if (!isMock) {
       const { data, error } = await supabase
         .from('orders')
@@ -364,7 +364,8 @@ const db = {
           business_name,
           delivery_location,
           payment_terms,
-          customer_phone
+          customer_phone,
+          order_type
         }])
         .select();
 
@@ -386,6 +387,7 @@ const db = {
         delivery_location,
         payment_terms,
         customer_phone,
+        order_type,
         created_at: new Date().toISOString()
       };
       
@@ -1286,6 +1288,239 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
       data.leads = leads;
       writeMockDb(data);
       return lead;
+    }
+  },
+
+  // ---------------------------------------------------------------------
+  // Restaurant flow + webhook dedup repository methods
+  // ---------------------------------------------------------------------
+
+  /**
+   * Return a client's full menu (products) with the fields the menu-based AI
+   * matcher and availability logic need: id, name, category, price,
+   * stock_quantity and is_available. Scoped to clientId.
+   */
+  async getClientMenu(clientId) {
+    if (!clientId) return [];
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('products')
+        .select('id, name, category, price, stock_quantity, is_available')
+        .eq('client_id', clientId);
+      if (error) {
+        console.error('Error fetching client menu from Supabase:', error);
+        return [];
+      }
+      return data || [];
+    } else {
+      const data = readMockDb();
+      return (data.products || []).filter(p => p.client_id === clientId);
+    }
+  },
+
+  /**
+   * Fetch a product by primary key, scoped to a client. Used by the
+   * server-side check on menu-based AI matches: a returned product_id is only
+   * trusted if this resolves to a row in THAT client's catalog.
+   */
+  async getProductById(productId, clientId = null) {
+    if (!productId) return null;
+    if (!isMock) {
+      let query = supabase.from('products').select('*').eq('id', productId);
+      if (clientId) query = query.eq('client_id', clientId);
+      const { data, error } = await query.maybeSingle();
+      if (error) {
+        console.error('Error fetching product by id from Supabase:', error);
+        return null;
+      }
+      return data || null;
+    } else {
+      const data = readMockDb();
+      return (data.products || []).find(p => p.id === productId && (!clientId || p.client_id === clientId)) || null;
+    }
+  },
+
+  /**
+   * Set a product's menu availability (OUT/IN merchant commands). Scoped to a
+   * client so a command can never flip another tenant's row.
+   * @returns {Promise<Object|null>} Updated product row, or null if not found.
+   */
+  async setProductAvailability(productId, isAvailable, clientId = null) {
+    if (!productId) return null;
+    if (!isMock) {
+      let query = supabase.from('products').update({ is_available: !!isAvailable }).eq('id', productId);
+      if (clientId) query = query.eq('client_id', clientId);
+      const { data, error } = await query.select().maybeSingle();
+      if (error) {
+        console.error('Error updating product availability in Supabase:', error);
+        return null;
+      }
+      return data || null;
+    } else {
+      const data = readMockDb();
+      const product = (data.products || []).find(p => p.id === productId && (!clientId || p.client_id === clientId));
+      if (!product) return null;
+      product.is_available = !!isAvailable;
+      writeMockDb(data);
+      return product;
+    }
+  },
+
+  /**
+   * Set a client's accepting_orders toggle (CLOSED/OPEN merchant commands).
+   */
+  async setClientAcceptingOrders(clientId, accepting) {
+    if (!clientId) return null;
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('clients')
+        .update({ accepting_orders: !!accepting })
+        .eq('id', clientId)
+        .select()
+        .maybeSingle();
+      if (error) {
+        console.error('Error updating client accepting_orders in Supabase:', error);
+        return null;
+      }
+      return data || null;
+    } else {
+      const data = readMockDb();
+      const client = (data.clients || []).find(c => c.id === clientId);
+      if (!client) return null;
+      client.accepting_orders = !!accepting;
+      writeMockDb(data);
+      return client;
+    }
+  },
+
+  /**
+   * Count orders currently ahead of a given order in the restaurant prep
+   * queue: every order for this client in a NON-FINAL status other than the
+   * order itself. Feeds the queue-aware ETA (10 min per order ahead).
+   */
+  async countQueueAhead(clientId, excludeOrderId = null) {
+    if (!clientId) return 0;
+    const isQueueAhead = (o) => {
+      if (excludeOrderId && o.id === excludeOrderId) return false;
+      const FINAL_STATUSES = ['rejected', 'cancelled', 'ready_for_customer', 'supplier_declined', 'ops_declined'];
+      return !FINAL_STATUSES.includes(o.status);
+    };
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('id, status')
+        .eq('client_id', clientId);
+      if (error) {
+        console.error('Error counting queued orders from Supabase:', error);
+        return 0;
+      }
+      return (data || []).filter(isQueueAhead).length;
+    } else {
+      const data = readMockDb();
+      return (data.orders || []).filter(isQueueAhead).length;
+    }
+  },
+
+  /**
+   * True when a WhatsApp message id has already been processed (webhook dedup).
+   * A redelivered webhook (Meta retries on a failed ack) is dropped first.
+   */
+  async hasProcessedMessage(messageId) {
+    if (!messageId) return false;
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('processed_messages')
+        .select('message_id')
+        .eq('message_id', messageId)
+        .maybeSingle();
+      if (error) {
+        console.error('Error checking processed_messages in Supabase:', error);
+        return false;
+      }
+      return !!data;
+    } else {
+      const data = readMockDb();
+      return !!(data.processed_messages || []).find(m => m.message_id === messageId);
+    }
+  },
+
+  /**
+   * Record a WhatsApp message id as processed. Inserted once webhook
+   * processing begins (after the dedup check).
+   */
+  async markMessageProcessed(messageId) {
+    if (!messageId) return;
+    if (!isMock) {
+      const { error } = await supabase
+        .from('processed_messages')
+        .insert({ message_id: messageId });
+      if (error) {
+        // Safely treat a duplicate as success: the row already exists, which is
+        // exactly the dedup state this method is meant to guarantee.
+        console.warn(`⚠️ processed_messages insert warned (usually a race/dup): ${error.message}`);
+      }
+    } else {
+      const data = readMockDb();
+      data.processed_messages = data.processed_messages || [];
+      if (!data.processed_messages.find(m => m.message_id === messageId)) {
+        data.processed_messages.push({
+          message_id: messageId,
+          processed_at: new Date().toISOString()
+        });
+      }
+      writeMockDb(data);
+    }
+  },
+
+  /**
+   * All restaurant-category clients. Powers the daily menu-reset cron.
+   */
+  async getRestaurantClients() {
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('clients')
+        .select('*')
+        .eq('business_category', 'restaurant');
+      if (error) {
+        console.error('Error fetching restaurant clients from Supabase:', error);
+        return [];
+      }
+      return data || [];
+    } else {
+      const data = readMockDb();
+      return (data.clients || []).filter(c => c.business_category === 'restaurant');
+    }
+  },
+
+  /**
+   * Reset menu availability for every product of a client back to true. The
+   * daily menu-reset cron calls this for each restaurant client so OUT/IN
+   * timeouts don't persist across days.
+   */
+  async resetProductsAvailable(clientId) {
+    if (!clientId) return 0;
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('products')
+        .update({ is_available: true })
+        .eq('client_id', clientId)
+        .select('id');
+      if (error) {
+        console.error('Error resetting product availability in Supabase:', error);
+        return 0;
+      }
+      return (data || []).length;
+    } else {
+      const data = readMockDb();
+      let count = 0;
+      for (const p of data.products || []) {
+        if (p.client_id === clientId && !p.is_available) {
+          p.is_available = true;
+          count++;
+        }
+      }
+      writeMockDb(data);
+      return count;
     }
   },
 

@@ -47,6 +47,12 @@ CREATE TABLE clients (
     -- dedup stamp of the last day the report was actually sent.
     daily_summary_time TEXT NOT NULL DEFAULT '09:00',
     last_summary_sent_at DATE,
+    -- Restaurant flow toggles. These drive which fulfillment options are shown
+    -- (delivery/pickup buttons) and whether the bot accepts new customer
+    -- orders at all (CLOSED/OPEN merchant command). Ignored by b2b/dropshipper.
+    offers_delivery BOOLEAN NOT NULL DEFAULT true,
+    offers_pickup BOOLEAN NOT NULL DEFAULT true,
+    accepting_orders BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -81,6 +87,11 @@ CREATE TABLE products (
     category TEXT,
     price NUMERIC(10, 2) NOT NULL CHECK (price >= 0),
     stock_quantity INTEGER NOT NULL DEFAULT 0 CHECK (stock_quantity >= 0),
+    -- Menu availability for 'restaurant' clients: replaces the
+    -- stock_quantity model for that category. Independent of stock_quantity,
+    -- which stays as-is for b2b/dropshipper. OUT/IN merchant commands toggle
+    -- it; the daily menu-reset cron flips it back to true.
+    is_available BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (client_id, name),
     UNIQUE (client_id, sku)
@@ -120,6 +131,11 @@ CREATE TABLE orders (
     -- Customer (payer) WhatsApp number, snapshot at confirmation so credit
     -- reminder messages can be sent to the right person.
     customer_phone TEXT,
+    -- Fulfillment choice for restaurant orders ('delivery' | 'pickup' | null),
+    -- captured from the delivery/pickup button message. Lets READY <short> tell
+    -- the customer "ready for pickup" vs "out for delivery". Never set for
+    -- b2b/dropshipper orders.
+    order_type TEXT CHECK (order_type IN ('delivery', 'pickup') OR order_type IS NULL),
     -- Dedup guard for the daily credit-reminder job: set to now() whenever a
     -- reminder is successfully sent. Milestones whose due date is <= this
     -- date are not re-sent, so re-running the job within the same day (or
@@ -170,6 +186,14 @@ CREATE TABLE leads (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 8. Create Processed Messages Table
+-- Webhook dedup: message_id is the WhatsApp message id from the Meta payload;
+-- a redelivered webhook (Meta retries) is dropped before reprocessing.
+CREATE TABLE processed_messages (
+    message_id TEXT PRIMARY KEY,
+    processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Indexes for performance & quick queries
 CREATE INDEX idx_clients_whatsapp_number ON clients (whatsapp_number);
 CREATE INDEX idx_suppliers_client_id ON suppliers (client_id);
@@ -199,6 +223,10 @@ ALTER TABLE clients ENABLE ROW LEVEL SECURITY;
 -- Leads is internal-only (marketing signups), accessed only via the
 -- service_role key — no client-facing policies are added.
 ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
+
+-- processed_messages is internal-only (webhook dedup), accessed only via the
+-- service_role key — no client-facing policies are added.
+ALTER TABLE processed_messages ENABLE ROW LEVEL SECURITY;
 
 -- ----------------------------------------------------
 -- RLS POLICIES FOR SECURE CLIENT-SIDE / THIRD-PARTY ACCESS

@@ -121,6 +121,169 @@ function mockHeuristicParse(message) {
 }
 
 /**
+ * Restaurant term-extraction helpers for the mock menu parser. This SIMULATES
+ * the three-outcome classification the live prompt produces:
+ *   - a clause that matches exactly one menu item  -> "matched"
+ *   - a clause that matches several menu items     -> "ambiguous"
+ *   - a clause that matches no menu item           -> "no_match"
+ *
+ * Messages are split into clauses on commas / "and" / "with" / "plus", then
+ * each clause is cleaned of quantities, question-lead fluff ("what of",
+ * "can i", "i want", ...) and filler. Digits (or number words) become the
+ * item's quantity.
+ */
+
+// Spoken quantities, so "three jollof rice" behaves like "3 jollof rice".
+const MENU_NUMBER_WORDS = {
+  one: 1, two: 2, three: 3, four: 4, five: 5,
+  six: 6, seven: 7, eight: 8, nine: 9, ten: 10
+};
+
+// Leading conversational fluff stripped from a clause before matching, so
+// "what of the chicken" or "can i add rice" reduce to the actual item term.
+const MENU_CLAUSE_LEAD_FLUFF = [
+  'what about', 'what of', 'what is', 'what are', "what's",
+  'how about', 'how much is', 'how much',
+  'can i get', 'can i have', 'can i', 'could i get', 'could i have', 'could i',
+  'i would like', 'i want to', 'i want', "i'd like", 'i will have', 'i will',
+  'i need', 'please give me', 'please add', 'please',
+  'give me', 'gimme', 'one of', 'also want', 'also', 'add',
+  'with', 'and', 'the', 'a', 'an', 'some', 'my'
+];
+
+/**
+ * Clean a single message clause into a { term, quantity } pair.
+ * @param {string} clause
+ * @returns {{ term: string, quantity: number }}
+ */
+function cleanMenuClause(clause) {
+  let t = String(clause || '')
+    .toLowerCase()
+    .replace(/^['"(]+/, '')
+    .replace(/['"?.,;!)]+$/, '')
+    .trim();
+
+  let quantity = 0;
+  let match = t.match(/^(\d+)\s+/);
+  if (match) {
+    quantity = parseInt(match[1], 10) || 1;
+    t = t.slice(match[0].length).trim();
+  } else {
+    for (const [word, n] of Object.entries(MENU_NUMBER_WORDS)) {
+      const wm = new RegExp(`^${word}\\s+(.{2,})`);
+      if (wm.test(t)) {
+        quantity = n;
+        t = t.replace(wm, '$1').trim();
+        break;
+      }
+    }
+  }
+
+  let prev;
+  do {
+    prev = t;
+    for (const lead of MENU_CLAUSE_LEAD_FLUFF) {
+      const re = new RegExp(`^${lead.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+`);
+      if (re.test(t)) {
+        t = t.replace(re, '').trim();
+        break;
+      }
+    }
+  } while (t !== prev);
+
+  t = t.replace(/\s+(please|that's all|thats all|only|ok|okay)$/i, '').trim();
+
+  return { term: t, quantity: quantity || 1 };
+}
+
+/**
+ * Split a customer message into candidate menu terms (clause-based).
+ * @param {string} message
+ * @returns {Array<{ term: string, quantity: number }>}
+ */
+function mockMenuTerms(message) {
+  const clauses = String(message || '')
+    .split(/[;,]|\band\b|\bplus\b|\bwith\b|&/i)
+    .map(c => c.trim())
+    .filter(Boolean);
+
+  const seen = new Set();
+  const terms = [];
+  for (const clause of clauses) {
+    const { term, quantity } = cleanMenuClause(clause);
+    if (!term || term.length < 3 || seen.has(term)) {
+      if (term && term.length >= 3) seen.add(term);
+      continue;
+    }
+    seen.add(term);
+    terms.push({ term, quantity });
+  }
+  return terms;
+}
+
+/**
+ * Mock simulation of MENU-BASED matching (restaurant category): each extracted
+ * clause is classified against the menu into one of the three outcomes the
+ * live prompt returns (matched / ambiguous / no_match), so the mock and live
+ * behavior stay aligned. A term that matches several items is ALWAYS reported
+ * as ambiguous (never silently guessed); a term that matches none is reported
+ * as no_match for downstream suggestion handling. This keeps mock and live
+ * behavior aligned: the parse never returns a name we don't own.
+ *
+ * @param {string} message
+ * @param {Array<Object>} menuItems - [{ id, name, ... }]
+ * @returns {{ items: Array<Object> }}
+ *   items: [{ term, quantity, modifiers, outcome, product_id, candidates, suggested_category }]
+ */
+function mockMenuParse(message, menuItems) {
+  const menu = Array.isArray(menuItems) ? menuItems : [];
+  const namesOverlap = (catalogName, searchName) => {
+    const catalog = String(catalogName || '').toLowerCase();
+    const search = String(searchName || '').toLowerCase();
+    if (!catalog || !search) return false;
+    return catalog.includes(search) || search.includes(catalog);
+  };
+
+  const items = [];
+  for (const clause of mockMenuTerms(message)) {
+    const matches = menu.filter(m => namesOverlap(m.name, clause.term));
+    if (matches.length === 1) {
+      items.push({
+        term: clause.term,
+        outcome: 'matched',
+        product_id: matches[0].id,
+        quantity: clause.quantity,
+        modifiers: [],
+        candidates: [],
+        suggested_category: null
+      });
+    } else if (matches.length > 1) {
+      items.push({
+        term: clause.term,
+        outcome: 'ambiguous',
+        product_id: null,
+        quantity: clause.quantity,
+        modifiers: [],
+        candidates: matches.map(m => m.id),
+        suggested_category: null
+      });
+    } else {
+      items.push({
+        term: clause.term,
+        outcome: 'no_match',
+        product_id: null,
+        quantity: clause.quantity,
+        modifiers: [],
+        candidates: [],
+        suggested_category: null
+      });
+    }
+  }
+
+  return { items };
+}
+
+/**
  * Default (generic) extraction prompt. Used when no business-category prompt
  * is supplied — kept as the fallback so behavior is unchanged for categories
  * that are missing or unrecognized.
@@ -200,6 +363,64 @@ const cloudflareClient = {
     } else {
       await new Promise(resolve => setTimeout(resolve, 600));
       return mockHeuristicParse(message);
+    }
+  },
+
+  /**
+   * Menu-based order parsing for 'restaurant' category clients: the client's
+   * full menu is passed as structured context and the model must classify each
+   * item as matched / ambiguous / no_match using exact product ids from it.
+   * Never free-text names; ids are re-verified server-side by restaurantService.
+   *
+   * Normalizes the model response into a stable shape handled by aiService:
+   *   { items: [{ term, outcome, quantity, modifiers, product_id, candidates, suggested_category }] }
+   *
+   * @param {string} message - Incoming order text
+   * @param {Array<Object>} menuItems - Client menu rows ({ id, name, ... })
+   * @param {Function|null} [buildPrompt] - (message) => promptString.
+   *   When null, the restaurant menu prompt (restaurantPrompts.buildMenuPrompt)
+   *   is used.
+   * @returns {Promise<{ items: Array<Object> }>}
+   */
+  async parseOrderWithMenu(message, menuItems = [], buildPrompt = null) {
+    if (!isMock) {
+      try {
+        const prompt = buildPrompt
+          ? buildPrompt(message)
+          : require('./prompts/restaurantPrompts').buildMenuPrompt(menuItems, message);
+
+        const url = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
+
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: prompt }],
+            response_format: { type: 'json_object' }
+          })
+        });
+
+        const data = await response.json();
+
+        if (!response.ok || data.success === false) {
+          throw new Error(`Cloudflare Workers AI error: ${JSON.stringify(data)}`);
+        }
+
+        const raw = data.result.response;
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        return {
+          items: Array.isArray(parsed.items) ? parsed.items : []
+        };
+      } catch (error) {
+        console.error('❌ Live menu-based parsing failed, falling back to mock menu match:', error);
+        return mockMenuParse(message, menuItems);
+      }
+    } else {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      return mockMenuParse(message, menuItems);
     }
   }
 };
