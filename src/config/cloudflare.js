@@ -10,7 +10,7 @@
 
 require('dotenv').config();
 
-const CF_MODEL = '@cf/meta/llama-3.1-8b-instruct';
+const CF_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 
 function cfConfigured() {
   const acct = process.env.CLOUDFLARE_ACCOUNT_ID;
