@@ -123,4 +123,53 @@ Return JSON matching this exact structure, and nothing else:
 }`;
 }
 
-module.exports = { CATEGORY, buildPrompt, buildMenuPrompt };
+/**
+ * Build the constrained question-answering prompt for restaurant clients.
+ * Fires ONLY after the order parser found zero items. The model may answer
+ * strictly from the facts supplied here; anything else must return
+ * is_question:false so the caller uses its existing safe fallback.
+ *
+ * @param {Object} context - { business_name, accepting_orders, offers_delivery,
+ *   offers_pickup, menu:[{name,category,price}], recent_order|null }
+ * @param {string} message - Customer's WhatsApp text
+ * @returns {string}
+ */
+function buildQAPrompt(context, message) {
+  const menuLines = (context.menu || [])
+    .map(m => `- ${m.name}${m.category ? ` (${m.category})` : ''}: ₦${Number(m.price).toFixed(2)}`)
+    .join('\n') || '(menu unavailable)';
+
+  const ro = context.recent_order;
+  const recentOrderBlock = ro
+    ? `\nThe customer has a recent order with us:\n` +
+      `- Order #${ro.short_id}: ${ro.items}\n` +
+      `- Status: ${ro.is_ready ? 'READY' : 'being prepared'}\n` +
+      (ro.is_ready ? '' : ro.eta_range ? `- Current estimate: ${ro.eta_range} minutes from now\n` : '')
+    : `\nThe customer has no recent order with us right now.\n`;
+
+  return `You are a helpful assistant for "${context.business_name}", a restaurant that takes orders over WhatsApp. The customer just sent a message that did NOT look like a food order. Decide whether you can confidently answer it using ONLY the facts below — never guess or invent anything not listed here.
+
+Known facts (this is ALL you know — nothing else):
+- Accepting orders right now: ${context.accepting_orders ? 'yes' : 'no'}
+- Offers delivery: ${context.offers_delivery ? 'yes' : 'no'}
+- Offers pickup: ${context.offers_pickup ? 'yes' : 'no'}
+- Menu (available items only):
+${menuLines}
+${recentOrderBlock}
+Customer's message:
+${JSON.stringify(String(message))}
+
+Rules:
+- Set "is_question" to true ONLY if the message is a genuine question AND the facts above are enough to answer it confidently (e.g. asking about their own order's status/ETA, asking whether delivery or pickup is offered, asking what's on the menu or the price of a menu item).
+- Set "is_question" to false for anything you cannot answer purely from the facts above — including hours of operation, policies, locations, or anything not listed. Do NOT guess, apologize, or make up a plausible-sounding answer in this case; just return false and let the caller handle it.
+- Set "is_question" to false if the message looks like it could actually be an order attempt, a greeting, or small talk rather than a real question.
+- When true, "answer" must be a short, friendly WhatsApp-appropriate reply (1-3 sentences), built only from the facts above — never invent a time, price, or detail not shown.
+
+Return JSON matching this exact structure, and nothing else:
+{
+  "is_question": false,
+  "answer": null
+}`;
+}
+
+module.exports = { CATEGORY, buildPrompt, buildMenuPrompt, buildQAPrompt };

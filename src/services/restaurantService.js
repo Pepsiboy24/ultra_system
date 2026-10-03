@@ -517,6 +517,63 @@ async function finalizeRestaurantOrder(customerPhone, client, pending) {
   }
 }
 
+/**
+ * Secondary check used ONLY when the order parser found zero items: try to
+ * answer a genuine question from facts we hold (menu, flags, the customer's
+ * recent order with a freshly recomputed ETA). Returns true when an answer
+ * was sent; false means the caller should use its existing fallback.
+ * Never throws.
+ */
+async function tryAnswerQuestion(from, client, trimmedText, menu) {
+  try {
+    if (!trimmedText) return false;
+
+    let recent_order = null;
+    const row = await db.getMostRecentOrderForCustomer(from, client.id);
+    const ACTIVE = ['approved', 'in_progress', 'ready_for_customer'];
+    if (row && ACTIVE.includes(row.status)) {
+      const ageMs = Date.now() - new Date(row.created_at).getTime();
+      if (ageMs < 4 * 60 * 60 * 1000) {
+        const isReady = row.status === 'ready_for_customer';
+        let eta_range = null;
+        if (!isReady) {
+          const queueAhead = await db.countQueueAhead(client.id, row.id);
+          eta_range = computeEtaRange(queueAhead).string;
+        }
+        const lines = await db.getOrderItems(row.id, client.id);
+        recent_order = {
+          short_id: String(row.id).slice(0, 8).toUpperCase(),
+          items: lines.map(i => `${i.quantity}x ${i.product_name}`).join(', ') || 'your items',
+          status: row.status,
+          is_ready: isReady,
+          eta_range
+        };
+      }
+    }
+
+    const context = {
+      business_name: client.business_name || 'the restaurant',
+      accepting_orders: client.accepting_orders !== false,
+      offers_delivery: client.offers_delivery !== false,
+      offers_pickup: client.offers_pickup !== false,
+      menu: (menu || [])
+        .filter(m => m.is_available !== false)
+        .map(m => ({ name: m.name, category: m.category, price: m.price })),
+      recent_order
+    };
+
+    const result = await aiService.answerRestaurantQuestion(trimmedText, context);
+    if (result && result.is_question === true && result.answer) {
+      await whatsappService.sendTextMessage(from, result.answer);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    console.error(`❌ tryAnswerQuestion failed (falling back): ${error.message}`);
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
@@ -615,6 +672,9 @@ async function handleFreshOrder({ from, client, messageType, trimmedText }) {
 
   const terms = Array.isArray(parsed.items) ? parsed.items : [];
   if (terms.length === 0) {
+    if (await tryAnswerQuestion(from, client, trimmedText, menu)) {
+      return { handled: true, status: 'answered_question' };
+    }
     await whatsappService.sendTextMessage(from, whatsappService.buildMenuNoMatchMessage(menu));
     return { handled: true, status: 'no_match' };
   }
@@ -770,6 +830,15 @@ async function handleAwaitingConfirm({ from, client, messageType, trimmedText, b
         }
         return { handled: true, status: 'modification_resolving' };
       }
+    }
+  }
+
+  if (trimmedText) {
+    const qaMenu = await db.getClientMenu(client.id);
+    if (await tryAnswerQuestion(from, client, trimmedText, qaMenu)) {
+      // Answered; order stays pending — nudge them back to Confirm/Cancel.
+      await whatsappService.sendConfirmCancelPrompt(from, whatsappService.buildRestaurantConfirmBody(pending));
+      return { handled: true, status: 'answered_question_at_confirm' };
     }
   }
 

@@ -577,6 +577,34 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
   },
 
   /**
+   * Most recent order (any status) for a customer phone within one tenant,
+   * newest first. Used by the restaurant Q&A layer to answer "where's my order".
+   */
+  async getMostRecentOrderForCustomer(customerPhone, clientId = null) {
+    if (!customerPhone || !clientId) return null;
+
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('client_id', clientId)
+        .eq('customer_phone', customerPhone)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (error) {
+        console.error('Error fetching most recent order for customer from Supabase:', error);
+        return null;
+      }
+      return data && data.length > 0 ? data[0] : null;
+    } else {
+      const data = readMockDb();
+      return (data.orders || [])
+        .filter(o => o.client_id === clientId && o.customer_phone === customerPhone)
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0] || null;
+    }
+  },
+
+  /**
    * Find the oldest order currently awaiting confirmation from a specific
    * supplier ('pending_supplier_confirmation'). This is the disambiguation
    * anchor for supplier replies: it only matches when the given phone is a

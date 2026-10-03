@@ -165,7 +165,23 @@ async function parseRestaurantMenuOrder(message, menuItems) {
   return normalizeMenuTerms(parsed, menuItems);
 }
 
+/**
+ * Constrained restaurant question-answering (secondary check, used only when
+ * the order parser found no items). Never throws — returns
+ * { is_question:false, answer:null } on any problem.
+ */
+async function answerRestaurantQuestion(message, context) {
+  if (!message || typeof message !== 'string') return { is_question: false, answer: null };
+  try {
+    return await cloudflareClient.answerRestaurantQuestion(message, context);
+  } catch (error) {
+    console.error(`❌ answerRestaurantQuestion failed: ${error.message}`);
+    return { is_question: false, answer: null };
+  }
+}
+
 module.exports = {
   parseOrderMessage,
-  parseRestaurantMenuOrder
+  parseRestaurantMenuOrder,
+  answerRestaurantQuestion
 };

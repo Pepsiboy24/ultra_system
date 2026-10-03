@@ -314,6 +314,32 @@ Return JSON matching this exact structure, and nothing else:
 }`;
 }
 
+/**
+ * Mock/fallback for restaurant Q&A (no live credentials, or live call failed).
+ * Conservative: only answers what context states outright, else not-a-question.
+ */
+function mockQuestionAnswer(message, context) {
+  const text = String(message || '').toLowerCase();
+  const ro = context && context.recent_order;
+  if (ro && /\b(time|ready|long|when|status|eta|where)\b/.test(text)) {
+    return {
+      is_question: true,
+      answer: ro.is_ready
+        ? `Your order #${ro.short_id} is ready! 🎉`
+        : ro.eta_range
+          ? `Your order #${ro.short_id} is being prepared — about ${ro.eta_range} minutes to go.`
+          : `Your order #${ro.short_id} is being prepared.`
+    };
+  }
+  if (/\bdeliver/.test(text) && context) {
+    return { is_question: true, answer: context.offers_delivery ? 'Yes, we offer delivery.' : "Sorry, we don't offer delivery right now." };
+  }
+  if (/\bpick\s?-?up\b/.test(text) && context) {
+    return { is_question: true, answer: context.offers_pickup ? 'Yes, pickup is available.' : "Sorry, we don't offer pickup right now." };
+  }
+  return { is_question: false, answer: null };
+}
+
 const cloudflareClient = {
   isMock,
   CONTAINER_UNIT_WORDS,
@@ -422,6 +448,42 @@ const cloudflareClient = {
       await new Promise(resolve => setTimeout(resolve, 600));
       return mockMenuParse(message, menuItems);
     }
+  },
+
+  /**
+   * Constrained restaurant Q&A. Returns { is_question, answer }. Any failure
+   * returns { is_question:false } so the caller uses its safe fallback.
+   */
+  async answerRestaurantQuestion(message, context = {}) {
+    if (!isMock) {
+      try {
+        const prompt = require('./prompts/restaurantPrompts').buildQAPrompt(context, message);
+        const url = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            messages: [{ role: 'user', content: prompt }],
+            response_format: { type: 'json_object' }
+          })
+        });
+        const data = await response.json();
+        if (!response.ok || data.success === false) {
+          throw new Error(`Cloudflare Workers AI error: ${JSON.stringify(data)}`);
+        }
+        const raw = data.result.response;
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        const ok = parsed && parsed.is_question === true && typeof parsed.answer === 'string' && parsed.answer.trim() !== '';
+        return ok ? { is_question: true, answer: parsed.answer.trim().slice(0, 600) } : { is_question: false, answer: null };
+      } catch (error) {
+        console.error('❌ Live restaurant Q&A failed, declining to answer:', error);
+        return { is_question: false, answer: null };
+      }
+    }
+    return mockQuestionAnswer(message, context);
   }
 };
 
