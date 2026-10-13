@@ -310,7 +310,9 @@ function chooseFulfillment(client) {
  * @returns {{ min: number, max: number, string: string }}
  */
 function computeEtaRange(queueAhead) {
-  const eta = BASE_PREP_MINUTES + (Number(queueAhead) || 0) * PER_ORDER_MINUTES;
+  // Cap so one stuck/forgotten order can never produce an absurd promise.
+  const MAX_ETA_MINUTES = Number(process.env.MAX_ETA_MINUTES) || 90;
+  const eta = Math.min(MAX_ETA_MINUTES, BASE_PREP_MINUTES + (Number(queueAhead) || 0) * PER_ORDER_MINUTES);
   const min = Math.max(5, Math.round(eta / 5) * 5);
   const max = min + 5;
   return { min, max, string: `${min}-${max}` };
@@ -431,18 +433,25 @@ async function notifyKitchen(client, pending, order, etaRange) {
   const typeLine = `${order.order_type === 'pickup' ? 'PICKUP' : 'DELIVERY'} · ETA ${etaRange.string} min`
     + (order.order_type === 'delivery' && order.delivery_location ? ` · ${order.delivery_location}` : '');
 
+  const templateName = process.env.KITCHEN_TICKET_TEMPLATE;
+  const templateLang = process.env.KITCHEN_TICKET_TEMPLATE_LANG || 'en';
+
   for (const phone of targets) {
     try {
-      const textResult = await whatsappService.sendTextMessage(phone, ticketText);
-      if (textResult && textResult.success === true) return { ok: true, via: `text:${phone}` };
-
-      const templateName = process.env.KITCHEN_TICKET_TEMPLATE;
+      // Template FIRST when configured. A free-form text to someone outside
+      // the 24h window is ACCEPTED by the API and only fails later (status
+      // webhook, error 131047) — we can't see that here, so text can't be
+      // trusted as the primary route. Templates always deliver.
       if (templateName) {
         const tResult = await whatsappService.sendTemplateMessage(
-          phone, templateName, process.env.KITCHEN_TICKET_TEMPLATE_LANG || 'en',
+          phone, templateName, templateLang,
           [shortId, itemsLine, `₦${Number(order.total_amount).toFixed(2)}`, typeLine]
         );
         if (tResult && tResult.success === true) return { ok: true, via: `template:${phone}` };
+      }
+      const textResult = await whatsappService.sendTextMessage(phone, ticketText);
+      if (textResult && textResult.success === true) {
+        return { ok: true, via: templateName ? `text:${phone}` : `text-unverified:${phone}` };
       }
     } catch (error) {
       console.error(`❌ notifyKitchen exception for ${phone}: ${error.message}`);
@@ -465,12 +474,15 @@ async function alertOperator(client, order, customerPhone, pending, reason) {
   const alertPhone = process.env.ALERT_PHONE;
   if (!alertPhone) return;
   try {
-    const r = await whatsappService.sendTextMessage(alertPhone, msg);
-    if (!(r && r.success === true) && process.env.KITCHEN_TICKET_TEMPLATE) {
-      await whatsappService.sendTemplateMessage(alertPhone, process.env.KITCHEN_TICKET_TEMPLATE,
+    const templateName = process.env.KITCHEN_TICKET_TEMPLATE;
+    let sent = false;
+    if (templateName) {
+      const t = await whatsappService.sendTemplateMessage(alertPhone, templateName,
         process.env.KITCHEN_TICKET_TEMPLATE_LANG || 'en',
-        [shortId, `KITCHEN NOT REACHED: ${client.business_name || ''} / ${customerPhone}`, `₦${Number(order.total_amount).toFixed(2)}`, reason]);
+        [shortId, `KITCHEN NOT REACHED: ${client.business_name || ''} / customer ${customerPhone}`, `₦${Number(order.total_amount).toFixed(2)}`, reason]);
+      sent = !!(t && t.success === true);
     }
+    if (!sent) await whatsappService.sendTextMessage(alertPhone, msg);
   } catch (error) {
     console.error(`❌ alertOperator failed: ${error.message}`);
   }
@@ -735,6 +747,14 @@ async function handleRestaurantMessage({ from, client, conversation, messageType
     if (cmdResult.handled) {
       return { handled: true, status: `merchant_${cmdResult.action}`, reply: cmdResult.reply, detail: 'merchant_command' };
     }
+    // Kitchen phones often run WhatsApp Business greeting/away auto-replies,
+    // which reply to OUR messages with long text. Answering those with help
+    // text risks two bots talking to each other forever, so long non-command
+    // text from the ops contact is ignored; short mistyped commands still get help.
+    if (trimmedText.length > 50) {
+      console.log(`🤫 rest: ignoring long non-command text from ops contact ${from} (likely an auto-reply).`);
+      return { handled: true, status: 'merchant_ignored_autoreply', detail: 'merchant_command' };
+    }
     // Ops contact text that isn't a command is not a customer order: show help.
     const help = `Ops commands: OUT <item> · IN <item> · CLOSED · OPEN · READY <order-id>`;
     await whatsappService.sendTextMessage(from, help);
@@ -796,6 +816,14 @@ async function handleFreshOrder({ from, client, messageType, trimmedText }) {
   }
 
   const menu = await db.getClientMenu(clientId);
+
+  // An empty menu means the lookup failed (a live restaurant always has one).
+  // Say so honestly instead of "we couldn't match that to our menu".
+  if (!Array.isArray(menu) || menu.length === 0) {
+    const reply = `Sorry, our menu is temporarily unavailable. Please try again in a minute 🙏`;
+    await whatsappService.sendTextMessage(from, reply);
+    return { handled: true, status: 'menu_unavailable', reply };
+  }
 
   // "Show me the menu" is never an order — answer it before the parser can
   // mistake the phrase for a dish.

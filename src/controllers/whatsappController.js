@@ -63,6 +63,9 @@ router.post('/', async (req, res) => {
         console.log(`💡 Status Update: message ${status.id} -> "${status.status}" for ${status.recipient_id}`);
         if (status.status === 'failed' && status.errors) {
           console.error('❌ WhatsApp Delivery Failed:', JSON.stringify(status.errors, null, 2));
+          if (status.errors.some(e => Number(e.code) === 131047)) {
+            console.error(`🚨 UNDELIVERED (24h window): ${status.recipient_id} has not messaged this number in 24h, so a free-form message was dropped. Kitchen/alert numbers need an approved template (KITCHEN_TICKET_TEMPLATE) or must message the bot daily.`);
+          }
         }
       } else {
         console.log('💡 Info: Webhook event does not contain a message payload (e.g. standard status update/read receipt).');

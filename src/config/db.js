@@ -1331,15 +1331,18 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
   async getClientMenu(clientId) {
     if (!clientId) return [];
     if (!isMock) {
-      const { data, error } = await supabase
-        .from('products')
-        .select('id, name, category, price, stock_quantity, is_available')
-        .eq('client_id', clientId);
-      if (error) {
-        console.error('Error fetching client menu from Supabase:', error);
-        return [];
+      // A one-off network blip must not look like "that dish isn't on the
+      // menu" — retry a couple of times before giving up.
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        const { data, error } = await supabase
+          .from('products')
+          .select('id, name, category, price, stock_quantity, is_available')
+          .eq('client_id', clientId);
+        if (!error) return data || [];
+        console.error(`Error fetching client menu from Supabase (attempt ${attempt}/3):`, error);
+        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * attempt));
       }
-      return data || [];
+      return [];
     } else {
       const data = readMockDb();
       return (data.products || []).filter(p => p.client_id === clientId);
@@ -1428,16 +1431,23 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
    */
   async countQueueAhead(clientId, excludeOrderId = null) {
     if (!clientId) return 0;
+    // Only RECENT orders can really be ahead in a kitchen queue; anything older
+    // is a forgotten/never-closed order and must not inflate every ETA.
+    const windowMs = (Number(process.env.QUEUE_WINDOW_MINUTES) || 180) * 60 * 1000;
+    const cutoff = Date.now() - windowMs;
+    const FINAL_STATUSES = ['rejected', 'cancelled', 'ready_for_customer', 'supplier_declined', 'ops_declined'];
     const isQueueAhead = (o) => {
       if (excludeOrderId && o.id === excludeOrderId) return false;
-      const FINAL_STATUSES = ['rejected', 'cancelled', 'ready_for_customer', 'supplier_declined', 'ops_declined'];
-      return !FINAL_STATUSES.includes(o.status);
+      if (FINAL_STATUSES.includes(o.status)) return false;
+      const created = o.created_at ? new Date(o.created_at).getTime() : Date.now();
+      return created >= cutoff;
     };
     if (!isMock) {
       const { data, error } = await supabase
         .from('orders')
-        .select('id, status')
-        .eq('client_id', clientId);
+        .select('id, status, created_at')
+        .eq('client_id', clientId)
+        .gte('created_at', new Date(cutoff).toISOString());
       if (error) {
         console.error('Error counting queued orders from Supabase:', error);
         return 0;
@@ -1445,7 +1455,7 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
       return (data || []).filter(isQueueAhead).length;
     } else {
       const data = readMockDb();
-      return (data.orders || []).filter(isQueueAhead).length;
+      return (data.orders || []).filter(o => o.client_id === clientId || !o.client_id).filter(isQueueAhead).length;
     }
   },
 
