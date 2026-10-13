@@ -407,6 +407,76 @@ async function processMerchantCommand({ from, client, text }) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Get the kitchen ticket to a human by every route we have, in order:
+ *   1. free-form text to operations_contact_phone (works inside the 24h window)
+ *   2. approved template (env KITCHEN_TICKET_TEMPLATE) — works outside 24h
+ *   3. the same two tries against kitchen_contact_phone, if different
+ * Template body must have 4 variables: {{1}} short id, {{2}} items,
+ * {{3}} total, {{4}} "PICKUP"/"DELIVERY" + ETA.
+ * Returns { ok, via } and never throws.
+ */
+async function notifyKitchen(client, pending, order, etaRange) {
+  const targets = [];
+  const ops = client.operations_contact_phone || pending.ops_contact_phone || null;
+  if (ops) targets.push(ops);
+  if (client.kitchen_contact_phone && client.kitchen_contact_phone !== ops) targets.push(client.kitchen_contact_phone);
+  if (targets.length === 0) return { ok: false, via: 'no_kitchen_number' };
+
+  const ticketText = whatsappService.buildRestaurantTicketMessage({
+    order, items: pending.items, total_amount: order.total_amount, etaRange: etaRange.string
+  });
+  const shortId = String(order.id).slice(0, 8).toUpperCase();
+  const itemsLine = (pending.items || [])
+    .map(i => `${i.quantity}x ${i.product_name || i.item_name}`).join(', ');
+  const typeLine = `${order.order_type === 'pickup' ? 'PICKUP' : 'DELIVERY'} · ETA ${etaRange.string} min`
+    + (order.order_type === 'delivery' && order.delivery_location ? ` · ${order.delivery_location}` : '');
+
+  for (const phone of targets) {
+    try {
+      const textResult = await whatsappService.sendTextMessage(phone, ticketText);
+      if (textResult && textResult.success === true) return { ok: true, via: `text:${phone}` };
+
+      const templateName = process.env.KITCHEN_TICKET_TEMPLATE;
+      if (templateName) {
+        const tResult = await whatsappService.sendTemplateMessage(
+          phone, templateName, process.env.KITCHEN_TICKET_TEMPLATE_LANG || 'en',
+          [shortId, itemsLine, `₦${Number(order.total_amount).toFixed(2)}`, typeLine]
+        );
+        if (tResult && tResult.success === true) return { ok: true, via: `template:${phone}` };
+      }
+    } catch (error) {
+      console.error(`❌ notifyKitchen exception for ${phone}: ${error.message}`);
+    }
+  }
+  return { ok: false, via: 'all_routes_failed' };
+}
+
+/**
+ * Tell the platform operator (ALERT_PHONE) that a kitchen could not be
+ * reached, so a human can phone the restaurant. Best-effort; always logged.
+ */
+async function alertOperator(client, order, customerPhone, pending, reason) {
+  const shortId = String(order.id).slice(0, 8).toUpperCase();
+  const msg = `🚨 KITCHEN NOT REACHED — ${client.business_name || client.id}\n` +
+    `Order #${shortId} · ${(pending.items || []).map(i => `${i.quantity}x ${i.product_name || i.item_name}`).join(', ')}\n` +
+    `Total ₦${Number(order.total_amount).toFixed(2)} · ${order.order_type}\n` +
+    `Customer: ${customerPhone}\nReason: ${reason}\nPlease contact the restaurant now.`;
+  console.error(`🚨 ${msg.replace(/\n/g, ' | ')}`);
+  const alertPhone = process.env.ALERT_PHONE;
+  if (!alertPhone) return;
+  try {
+    const r = await whatsappService.sendTextMessage(alertPhone, msg);
+    if (!(r && r.success === true) && process.env.KITCHEN_TICKET_TEMPLATE) {
+      await whatsappService.sendTemplateMessage(alertPhone, process.env.KITCHEN_TICKET_TEMPLATE,
+        process.env.KITCHEN_TICKET_TEMPLATE_LANG || 'en',
+        [shortId, `KITCHEN NOT REACHED: ${client.business_name || ''} / ${customerPhone}`, `₦${Number(order.total_amount).toFixed(2)}`, reason]);
+    }
+  } catch (error) {
+    console.error(`❌ alertOperator failed: ${error.message}`);
+  }
+}
+
+/**
  * Finalize a confirmed restaurant order: create the order row + items, notify
  * the kitchen (operations_contact_phone), and tell the customer the ETA.
  *
@@ -461,37 +531,26 @@ async function finalizeRestaurantOrder(customerPhone, client, pending) {
     const etaRange = computeEtaRange(queueAhead);
     console.log(`🍽️ Order ${order.id} created (${order.order_type}) · queueAhead=${queueAhead} · ETA ${etaRange.string} min`);
 
-    // Kitchen/ops notification (operations_contact_phone, best-effort).
-    const opsPhone = client.operations_contact_phone || pending.ops_contact_phone || null;
-    if (opsPhone) {
-      const ticketResult = await whatsappService.sendTextMessage(
-        opsPhone,
-        whatsappService.buildRestaurantTicketMessage({
+    // Kitchen notification — never silent. If no route reaches a human, the
+    // customer is NOT told "confirmed with an ETA"; the operator is alerted.
+    const kitchen = await notifyKitchen(client, pending, order, etaRange);
+    console.log(`👨🍳 Kitchen notification for order ${order.id}: ${kitchen.ok ? `sent via ${kitchen.via}` : `FAILED (${kitchen.via})`}`);
+    if (!kitchen.ok) {
+      await alertOperator(client, order, customerPhone, pending, kitchen.via);
+    }
+
+    // Customer message: ETA only when the kitchen actually has the order.
+    const customerBody = kitchen.ok
+      ? whatsappService.buildRestaurantEtaMessage({
           order,
           items: pending.items,
           total_amount: order.total_amount,
           etaRange: etaRange.string
         })
-      );
-      console.log(`👨🍳 Kitchen ticket to ${opsPhone}: ${ticketResult && ticketResult.success === true ? 'sent' : `NOT sent (${JSON.stringify(ticketResult)})`}`);
-      if (!(ticketResult && ticketResult.success === true)) {
-        console.error(`⚠️ Restaurant kitchen ticket to ${opsPhone} NOT sent (continuing):`, JSON.stringify(ticketResult));
-      }
-    } else {
-      console.warn(`⚠️ Restaurant client ${clientId} has no operations_contact_phone — kitchen not notified for order ${order.id}.`);
-    }
-
-    // Customer ETA.
-    const customerResult = await whatsappService.sendTextMessage(
-      customerPhone,
-      whatsappService.buildRestaurantEtaMessage({
-        order,
-        items: pending.items,
-        total_amount: order.total_amount,
-        etaRange: etaRange.string
-      })
-    );
-    console.log(`📬 Customer ETA to ${customerPhone}: ${customerResult && customerResult.success === true ? 'sent' : `NOT sent (${JSON.stringify(customerResult)})`}`);
+      : `✅ We've received your order #${String(order.id).slice(0, 8).toUpperCase()}! ` +
+        `We're confirming it with the kitchen right now and will message you shortly. Thank you for your patience 🙏`;
+    const customerResult = await whatsappService.sendTextMessage(customerPhone, customerBody);
+    console.log(`📬 Customer message to ${customerPhone}: ${customerResult && customerResult.success === true ? 'sent' : `NOT sent (${JSON.stringify(customerResult)})`}`);
 
     // State clears ONLY after the order + notifications are complete (or the
     // failure path below releases it explicitly).
@@ -517,6 +576,54 @@ async function finalizeRestaurantOrder(customerPhone, client, pending) {
   }
 }
 
+// A customer who walks away mid-order must not be trapped in that step forever.
+const STATE_TTL_MS = (Number(process.env.RESTAURANT_STATE_TTL_MINUTES) || 45) * 60 * 1000;
+const CANCEL_RE = /^\s*(cancel|cancel (it|order|my order)|start over|restart|new order|never ?mind|forget it|stop)\s*[.!]*\s*$/i;
+const QUESTION_START_RE = /^\s*(how|what|when|where|why|do|does|can|could|is|are|will|would|which)\b/i;
+
+/**
+ * Read a delivery/pickup choice out of free text ("pickup please",
+ * "I'll collect it", "deliver it"). Questions ("how long will delivery
+ * take?") and messages mentioning both options are NOT choices.
+ */
+function detectFulfillmentChoice(text) {
+  const lower = String(text || '').toLowerCase().trim();
+  if (!lower) return null;
+  if (['delivery', 'deliver', 'deliver to'].includes(lower)) return 'delivery';
+  if (['pickup', 'pick up', 'pick it up', 'collect'].includes(lower)) return 'pickup';
+  if (lower.includes('?') || QUESTION_START_RE.test(lower)) return null;
+  const hasDelivery = /\bdeliver(y|ed)?\b/.test(lower);
+  const hasPickup = /\b(pick\s?-?up|pick\s+(it|them|that|this)\s+up|collect|take\s?-?away)\b/.test(lower);
+  if (hasDelivery && !hasPickup) return 'delivery';
+  if (hasPickup && !hasDelivery) return 'pickup';
+  return null;
+}
+
+const MENU_REQUEST_RE = /\b(menu|what\s+(do\s+you|can\s+i)\s+(have|sell|offer|get|order)|what('?s|\s+is)\s+(available|on\s+offer)|what\s+food|what\s+dishes)\b/i;
+const ORDERISH_RE = /\b(order|add|buy|want|give me|get me|i'?ll have|i'?d like|id like)\b/i;
+const VIEWISH_RE = /\b(see|show|send|view|check|look|share|list)\b/i;
+
+/** True when the message is asking to SEE the menu (not placing an order). */
+function isMenuRequest(text) {
+  const t = String(text || '');
+  if (!MENU_REQUEST_RE.test(t)) return false;
+  return !(ORDERISH_RE.test(t) && !VIEWISH_RE.test(t));
+}
+
+/** Format the available menu, grouped by category, for a WhatsApp text. */
+function buildFullMenuMessage(menu) {
+  const items = (menu || []).filter(m => m.is_available !== false);
+  if (items.length === 0) return null;
+  const groups = new Map();
+  for (const m of items.slice(0, 40)) {
+    const cat = m.category || 'Menu';
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(`• ${m.name} — ₦${Number(m.price).toFixed(2)}`);
+  }
+  const body = [...groups.entries()].map(([cat, lines]) => `*${cat}*\n${lines.join('\n')}`).join('\n\n');
+  return `🍽️ Here's our menu:\n\n${body}\n\nJust tell me what you'd like to order!`;
+}
+
 /**
  * Secondary check used ONLY when the order parser found zero items: try to
  * answer a genuine question from facts we hold (menu, flags, the customer's
@@ -527,6 +634,15 @@ async function finalizeRestaurantOrder(customerPhone, client, pending) {
 async function tryAnswerQuestion(from, client, trimmedText, menu) {
   try {
     if (!trimmedText) return false;
+
+    // Deterministic shortcut: "show me the menu" never needs the AI.
+    if (isMenuRequest(trimmedText)) {
+      const menuText = buildFullMenuMessage(menu);
+      if (menuText) {
+        await whatsappService.sendTextMessage(from, menuText);
+        return true;
+      }
+    }
 
     let recent_order = null;
     const row = await db.getMostRecentOrderForCustomer(from, client.id);
@@ -596,9 +712,21 @@ async function tryAnswerQuestion(from, client, trimmedText, menu) {
 async function handleRestaurantMessage({ from, client, conversation, messageType, text, buttonReply, location }) {
   const clientId = client.id;
   conversation = conversation || { state: 'idle', pending_order_data: null };
-  const state = conversation.state || 'idle';
-  const pending = conversation.pending_order_data || {};
+  let state = conversation.state || 'idle';
+  let pending = conversation.pending_order_data || {};
   const trimmedText = String(text || '').trim();
+
+  // --- Stale-state guard: an abandoned half-finished order expires, so a
+  //     customer returning later starts clean instead of being stuck.
+  if (state !== 'idle' && conversation.updated_at) {
+    const ageMs = Date.now() - new Date(conversation.updated_at).getTime();
+    if (Number.isFinite(ageMs) && ageMs > STATE_TTL_MS) {
+      console.log(`⏳ rest: state ${state} for ${from} is ${Math.round(ageMs / 60000)} min old — expired, starting fresh.`);
+      await db.clearConversationState(from);
+      state = 'idle';
+      pending = {};
+    }
+  }
 
   // --- Merchant commands (ops contact only) — always allowed, even when the
   //     restaurant is closed (OPEN must work to reopen it).
@@ -619,6 +747,14 @@ async function handleRestaurantMessage({ from, client, conversation, messageType
   if (client.accepting_orders === false && !MID_FLOW_STATES.includes(state)) {
     await sendNotAccepting(from);
     return { handled: true, status: 'not_accepting', detail: 'accepting_orders_false' };
+  }
+
+  // --- Escape hatch: "cancel" / "start over" always works mid-flow (the
+  //     confirm step has its own cancel handling).
+  if (state !== 'idle' && state !== STATE_AWAITING_CONFIRM && CANCEL_RE.test(trimmedText)) {
+    await db.clearConversationState(from);
+    await whatsappService.sendTextMessage(from, `No problem — I've cleared that order. Send me what you'd like whenever you're ready 😊`);
+    return { handled: true, status: 'cancelled_midflow' };
   }
 
   // --- State machine -------------------------------------------------------
@@ -660,6 +796,12 @@ async function handleFreshOrder({ from, client, messageType, trimmedText }) {
   }
 
   const menu = await db.getClientMenu(clientId);
+
+  // "Show me the menu" is never an order — answer it before the parser can
+  // mistake the phrase for a dish.
+  if (isMenuRequest(trimmedText) && await tryAnswerQuestion(from, client, trimmedText, menu)) {
+    return { handled: true, status: 'answered_question' };
+  }
 
   let parsed;
   try {
@@ -803,6 +945,10 @@ async function handleAwaitingConfirm({ from, client, messageType, trimmedText, b
   // resolution (Bug 2), so the customer isn't stuck at a bare YES/NO re-ask.
   if (trimmedText) {
     const menu = await db.getClientMenu(client.id);
+    if (isMenuRequest(trimmedText) && await tryAnswerQuestion(from, client, trimmedText, menu)) {
+      await whatsappService.sendConfirmCancelPrompt(from, whatsappService.buildRestaurantConfirmBody(pending));
+      return { handled: true, status: 'answered_question_at_confirm' };
+    }
     let parsed;
     try {
       parsed = await aiService.parseRestaurantMenuOrder(trimmedText, menu);
@@ -900,7 +1046,12 @@ async function handleResolvingItems({ from, client, messageType, trimmedText, bu
     }
 
     if (!removedCurrent) {
-      // Not a selection of the current item — parse as fresh/modified content:
+      // Not a selection of the current item. A menu request is answered
+      // first (never queued as a dish), then the pending item is re-asked.
+      if (isMenuRequest(trimmedText) && await tryAnswerQuestion(from, client, trimmedText, menu)) {
+        return askNextOrComplete(from, client, menu, pending);
+      }
+      // Otherwise parse as fresh/modified content:
       // merge clean matches, queue new ambiguous/no_match behind the current.
       let parsed;
       try {
@@ -909,11 +1060,29 @@ async function handleResolvingItems({ from, client, messageType, trimmedText, bu
         parsed = { items: [] };
       }
       const terms = Array.isArray(parsed.items) ? parsed.items : [];
+      if (terms.length === 0 && await tryAnswerQuestion(from, client, trimmedText, menu)) {
+        // Genuine question answered — keep the held order untouched and
+        // re-ask the SAME pending item so the customer can carry on.
+        return askNextOrComplete(from, client, menu, pending);
+      }
       if (terms.length > 0) {
         const before = pending.items || [];
         const after = planOrderItems(before, terms, menu);
         additions = itemsDelta(before, after.items);
         pending.items = after.items;
+        // If the customer just re-typed something we were still asking about
+        // and it now matches cleanly, drop the stale unresolved entry.
+        const matchedTerms = new Set(
+          terms.filter(t => t.outcome === 'matched')
+            .map(t => String(t.term || '').trim().toLowerCase())
+            .filter(Boolean)
+        );
+        if (matchedTerms.size > 0) {
+          pending.unresolved = (pending.unresolved || []).filter(
+            u => !matchedTerms.has(String(u.term || '').trim().toLowerCase())
+          );
+          pending.resolving_index = 0;
+        }
         if (after.unresolved.length) {
           pending.unresolved = (pending.unresolved || []).concat(after.unresolved);
         }
@@ -1004,9 +1173,7 @@ async function handleAwaitingFulfillment({ from, client, messageType, trimmedTex
   if (buttonReply && (buttonReply.id === 'delivery' || buttonReply.id === 'pickup')) {
     choice = buttonReply.id;
   } else if (trimmedText) {
-    const lower = trimmedText.toLowerCase();
-    if (['delivery', 'deliver', 'deliver to'].includes(lower)) choice = 'delivery';
-    else if (['pickup', 'pick up', 'pick it up', 'collect'].includes(lower)) choice = 'pickup';
+    choice = detectFulfillmentChoice(trimmedText);
   }
 
   if (!choice) {
@@ -1019,6 +1186,34 @@ async function handleAwaitingFulfillment({ from, client, messageType, trimmedTex
       STATE_AWAITING_FULFILLMENT
     );
     if (moved) return moved;
+
+    if (trimmedText) {
+      const qaMenu = await db.getClientMenu(client.id);
+
+      // Off-script but clearly a NEW order ("I'd like to order rice"): drop
+      // the half-finished one and start over instead of re-asking forever.
+      if (!isMenuRequest(trimmedText) && !trimmedText.includes('?')) {
+        let freshParse = null;
+        try { freshParse = await aiService.parseRestaurantMenuOrder(trimmedText, qaMenu); } catch (e) { freshParse = null; }
+        const freshTerms = freshParse && Array.isArray(freshParse.items) ? freshParse.items : [];
+        if (freshTerms.some(t => t.outcome === 'matched')) {
+          console.log(`♻️ rest: new order text at fulfillment step for ${from} — restarting.`);
+          await db.clearConversationState(from);
+          return handleFreshOrder({ from, client, messageType, trimmedText });
+        }
+      }
+
+      const answered = await tryAnswerQuestion(from, client, trimmedText, qaMenu);
+      const offered = chooseFulfillment(client);
+      await whatsappService.sendFulfillmentPrompt(
+        from,
+        answered
+          ? `How would you like to receive your order?`
+          : `I'm not sure about that one, but I can get your order moving! How would you like to receive it?`,
+        { offers_delivery: offered.includes('delivery'), offers_pickup: offered.includes('pickup') }
+      );
+      return { handled: true, status: answered ? 'answered_question_at_fulfillment' : 're_prompt_fulfillment' };
+    }
 
     await whatsappService.sendTextMessage(from, REPLY_NO_MATCH);
     return { handled: true, status: 're_prompt_fulfillment', reply: REPLY_NO_MATCH };

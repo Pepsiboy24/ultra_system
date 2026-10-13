@@ -57,6 +57,51 @@ async function sendTextMessage(to, body) {
 }
 
 /**
+ * Send an approved WhatsApp message TEMPLATE (works outside the 24-hour
+ * customer-service window, unlike free-form text). bodyParams fill {{1}},
+ * {{2}}... in order. Never throws.
+ */
+async function sendTemplateMessage(to, templateName, languageCode, bodyParams = []) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  if (!phoneNumberId || !accessToken) {
+    console.error('❌ WhatsApp Template Error: Missing WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN');
+    return { success: false, error: 'missing_credentials' };
+  }
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${phoneNumberId}/messages`;
+  const clean = (v) => String(v == null ? '' : v).replace(/[\n\t]+/g, ' ').replace(/ {5,}/g, '    ').trim().slice(0, 900) || '-';
+  const payload = {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: languageCode || 'en' },
+      components: bodyParams.length
+        ? [{ type: 'body', parameters: bodyParams.map(v => ({ type: 'text', text: clean(v) })) }]
+        : []
+    }
+  };
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      console.error('❌ WhatsApp Template Send Failed:', JSON.stringify(data, null, 2));
+      return { success: false, error: data };
+    }
+    console.log(`📤 WhatsApp template "${templateName}" sent to ${to}`);
+    return { success: true, data };
+  } catch (err) {
+    console.error('❌ WhatsApp Template Send Exception:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * Format a held order's line items for display, according to its business
  * category so category-specific parsed fields are reflected (not ignored):
  *   - restaurant : "2x Jollof Rice, 1x Chicken (no onions)"   (modifiers inline)
@@ -757,6 +802,7 @@ function buildMenuNoMatchMessage(menu) {
 
 module.exports = {
   sendTextMessage,
+  sendTemplateMessage,
   sendInteractiveButtons,
   sendConfirmCancelPrompt,
   sendFulfillmentPrompt,

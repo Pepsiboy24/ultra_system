@@ -101,6 +101,7 @@ Rules:
   * "matched": the item corresponds to exactly ONE menu item. Set "product_id" to that menu id. Leave "candidates" as an empty array.
   * "ambiguous": the item could match MORE THAN ONE menu item (e.g. "rice" matching several rice dishes). Set "candidates" to the ids of EVERY menu item the phrase could mean. Leave "product_id" as null.
   * "no_match": the item matches NO menu item. Leave "product_id" null, leave "candidates" empty, and set "suggested_category" to the menu "category" (exactly as written above) the customer most likely meant, or null if none fits.
+- Customers make typos and use casual phrasing (e.g. "eice" for "Rice", "cokee" for "Coke", "jolof" for "Jollof"). If a phrase is clearly a misspelling or close variant of a menu item, treat it as that item: use "matched" if it fits exactly ONE menu item, or "ambiguous" if it fits several. Use "no_match" ONLY when no menu item is a plausible interpretation. Keep "term" as the customer's original spelling.
 - "term" is the customer's original phrase for that item (do not paraphrase it).
 - All ids in "product_id" and "candidates" MUST be copied exactly from the menu context above — never invent an id or an item.
 - "quantity" is the customer's requested quantity, always a positive integer (default 1 if none is given).
@@ -162,7 +163,9 @@ ${JSON.stringify(String(message))}
 Rules:
 - Set "is_question" to true ONLY if the message is a genuine question AND the facts above are enough to answer it confidently (e.g. asking about their own order's status/ETA, asking whether delivery or pickup is offered, asking what's on the menu or the price of a menu item).
 - Set "is_question" to false for anything you cannot answer purely from the facts above — including hours of operation, policies, locations, or anything not listed. Do NOT guess, apologize, or make up a plausible-sounding answer in this case; just return false and let the caller handle it.
-- Set "is_question" to false if the message looks like it could actually be an order attempt, a greeting, or small talk rather than a real question.
+- Set "is_question" to false if the message looks like it could actually be an order attempt.
+- If the message is ONLY friendly small talk or a greeting (e.g. "how are you", "how's your day going", "hi"), set "is_question" to true and reply with ONE short, warm sentence that states no facts about the restaurant, then gently invite them to carry on with their order.
+- The "Current estimate" for a recent order is KITCHEN PREPARATION time only. Never present it as delivery or travel time. If asked how long delivery or travel will take, set "is_question" to false.
 - When true, "answer" must be a short, friendly WhatsApp-appropriate reply (1-3 sentences), built only from the facts above — never invent a time, price, or detail not shown.
 
 Return JSON matching this exact structure, and nothing else:
