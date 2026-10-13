@@ -558,9 +558,19 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
     const statusList = Array.isArray(status) ? status : (status ? [status] : null);
 
     if (!isMock) {
+      // orders.id is a UUID column, and Postgres has no ILIKE for uuid
+      // ("operator does not exist: uuid ~~* unknown"). A short reference is
+      // just the first hex chars of the UUID, so match it as a RANGE instead:
+      // every UUID starting with the prefix sorts between prefix-000... and prefix-fff...
+      const hex = ref.toLowerCase();
+      if (!/^[0-9a-f]{4,32}$/.test(hex)) return null; // not a valid reference
+      const toUuid = (h) => `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+      const lo = toUuid((hex + '0'.repeat(32)).slice(0, 32));
+      const hi = toUuid((hex + 'f'.repeat(32)).slice(0, 32));
+
       let query = supabase.from('orders').select('*').eq('client_id', clientId);
       if (statusList) query = query.in('status', statusList);
-      query = query.ilike('id', `${ref}%`).order('created_at', { ascending: false }).limit(1);
+      query = query.gte('id', lo).lte('id', hi).order('created_at', { ascending: false }).limit(1);
       const { data, error } = await query;
 
       if (error) {
