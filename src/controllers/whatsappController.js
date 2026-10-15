@@ -46,6 +46,19 @@ router.get('/', (req, res) => {
  * POST /api/webhook
  * Ingest Real-Time Webhook Messages from Meta
  */
+// Per-sender rate limit (best effort: kept in this isolate's memory, so it
+// stops a single spammer hammering one instance and the AI bill that follows).
+const RATE_LIMIT_MAX = Number(process.env.MAX_MESSAGES_PER_MINUTE) || 20;
+const rateBuckets = new Map();
+function isRateLimited(phone) {
+  const now = Date.now();
+  if (rateBuckets.size > 5000) rateBuckets.clear();
+  const recent = (rateBuckets.get(phone) || []).filter(t => now - t < 60000);
+  recent.push(now);
+  rateBuckets.set(phone, recent);
+  return recent.length > RATE_LIMIT_MAX;
+}
+
 router.post('/', async (req, res) => {
   try {
     const entry = req.body?.entry?.[0];
@@ -87,6 +100,10 @@ router.post('/', async (req, res) => {
     }
 
     const from = message.from;
+    if (from && isRateLimited(from)) {
+      console.warn(`🚦 Rate limit: dropping message from ${from} (over ${RATE_LIMIT_MAX}/min).`);
+      return res.status(200).json({ success: true, status: 'rate_limited' });
+    }
     const messageType = message.type;
     const textBody = message.text?.body;
     // Button replies (Confirm/Cancel/Delivery/Pickup) and shared location pins
@@ -136,7 +153,7 @@ router.post('/', async (req, res) => {
         detail: rResult.detail || null,
         system_metadata: {
           database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI',
           business_category: 'restaurant',
           processed_at: new Date().toISOString()
         }
@@ -165,7 +182,7 @@ router.post('/', async (req, res) => {
         sender: from,
         system_metadata: {
           database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI',
           processed_at: new Date().toISOString()
         }
       });
@@ -181,7 +198,7 @@ router.post('/', async (req, res) => {
         sender: from,
         system_metadata: {
           database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI',
           processed_at: new Date().toISOString()
         }
       });
@@ -202,7 +219,7 @@ router.post('/', async (req, res) => {
         sender: from,
         system_metadata: {
           database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI',
           processed_at: new Date().toISOString()
         }
       });
@@ -227,7 +244,7 @@ router.post('/', async (req, res) => {
         sender: from,
         system_metadata: {
           database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI',
           processed_at: new Date().toISOString()
         }
       });
@@ -279,7 +296,7 @@ router.post('/', async (req, res) => {
         state_before: conversation.state,
         system_metadata: {
           database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+          ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI',
           processed_at: new Date().toISOString()
         }
       });
@@ -337,7 +354,7 @@ router.post('/', async (req, res) => {
       },
       system_metadata: {
         database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-        ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+        ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI',
         business_category: businessCategory || null,
         resolved_client: client ? client.business_name : null,
         processed_at: new Date().toISOString()

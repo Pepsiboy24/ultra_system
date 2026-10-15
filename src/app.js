@@ -40,6 +40,26 @@ app.use('/', landingRoutes);
 // Serve static files from the 'public' directory
 app.use(express.static('public'));
 
+// Internal endpoints (dashboard data + the process-order test endpoint) need
+// the DASHBOARD_API_KEY secret, sent as an "x-api-key" header. If the secret
+// is not configured they are disabled entirely (fail closed). The WhatsApp
+// bot itself does not use any of these.
+function requireDashboardKey(req, res, next) {
+  const key = process.env.DASHBOARD_API_KEY;
+  if (!key) {
+    return res.status(503).json({ success: false, error: 'Disabled: DASHBOARD_API_KEY is not configured.' });
+  }
+  const provided = String(req.get('x-api-key') || '');
+  let diff = provided.length ^ key.length; // constant-time compare
+  for (let i = 0; i < key.length; i++) diff |= (provided.charCodeAt(i) || 0) ^ key.charCodeAt(i);
+  if (diff !== 0) {
+    return res.status(401).json({ success: false, error: 'Unauthorized.' });
+  }
+  next();
+}
+app.use('/api/dashboard', requireDashboardKey);
+app.use('/api/process-order', requireDashboardKey);
+
 // Mounting the B2B Pipeline Route
 app.use('/api', orderRoutes);
 app.use('/api/webhook', whatsappRoutes);
@@ -110,7 +130,7 @@ app.get('/api/status', (req, res) => {
     system_configuration: {
       port: PORT,
       database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-      ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B'
+      ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI'
     },
     quick_start: 'Try sending a POST request to /api/process-order with the text of your tea request!'
   });
@@ -134,7 +154,7 @@ if (process.env.WORKER_RUNTIME !== '1') {
     console.log('==================================================');
     console.log(`🍵 B2B Tea Order Server Running on http://localhost:${PORT}`);
     console.log(`📡 Database Mode: ${db.isMock ? 'LOCAL_MOCK_JSON (Simulated)' : 'SUPABASE_POSTGRES (Live)'}`);
-    console.log(`🧠 AI Engine Mode: ${cloudflareClient.isMock ? 'MOCK_HEURISTIC_NLP (Simulated)' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B (Live)'}`);
+    console.log(`🧠 AI Engine Mode: ${cloudflareClient.isMock ? 'MOCK_HEURISTIC_NLP (Simulated)' : 'LIVE_CLOUDFLARE_WORKERS_AI (Live)'}`);
     console.log('==================================================');
   });
 }

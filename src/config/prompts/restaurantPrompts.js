@@ -156,7 +156,7 @@ Known facts (this is ALL you know — nothing else):
 - Offers pickup: ${context.offers_pickup ? 'yes' : 'no'}
 - Menu (available items only):
 ${menuLines}
-${recentOrderBlock}
+${context.info ? `\nInformation written by the restaurant owner (you may quote this for questions about opening hours, delivery areas or fees, payment, or address — and ONLY this):\n${context.info}\n` : ''}${recentOrderBlock}
 Customer's message:
 ${JSON.stringify(String(message))}
 

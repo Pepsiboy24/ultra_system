@@ -1408,6 +1408,59 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
   },
 
   /**
+   * Update a menu item's price (PRICE merchant command). Tenant-scoped.
+   */
+  async setProductPrice(productId, price, clientId = null) {
+    if (!productId || !Number.isFinite(Number(price))) return null;
+    if (!isMock) {
+      let query = supabase.from('products').update({ price: Number(price) }).eq('id', productId);
+      if (clientId) query = query.eq('client_id', clientId);
+      const { data, error } = await query.select().maybeSingle();
+      if (error) {
+        console.error('Error updating product price in Supabase:', error);
+        return null;
+      }
+      return data || null;
+    } else {
+      const data = readMockDb();
+      const product = (data.products || []).find(p => p.id === productId && (!clientId || p.client_id === clientId));
+      if (!product) return null;
+      product.price = Number(price);
+      writeMockDb(data);
+      return product;
+    }
+  },
+
+  /**
+   * Save the owner-written restaurant info (hours, delivery areas/fees,
+   * payment, address) the bot may quote when customers ask (INFO command).
+   */
+  async setClientInfoText(clientId, infoText) {
+    if (!clientId) return null;
+    const value = infoText ? String(infoText).slice(0, 600) : null;
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('clients')
+        .update({ info_text: value })
+        .eq('id', clientId)
+        .select()
+        .maybeSingle();
+      if (error) {
+        console.error('Error updating client info_text in Supabase:', error);
+        return null;
+      }
+      return data || null;
+    } else {
+      const data = readMockDb();
+      const client = (data.clients || []).find(c => c.id === clientId);
+      if (!client) return null;
+      client.info_text = value;
+      writeMockDb(data);
+      return client;
+    }
+  },
+
+  /**
    * Set a client's accepting_orders toggle (CLOSED/OPEN merchant commands).
    */
   async setClientAcceptingOrders(clientId, accepting) {

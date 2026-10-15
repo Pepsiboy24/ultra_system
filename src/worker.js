@@ -87,8 +87,42 @@ async function runScheduled(controller) {
 
 const serverHandler = httpServerHandler({ port: PORT });
 
+/**
+ * Verify Meta's X-Hub-Signature-256 on WhatsApp webhook POSTs (HMAC-SHA256 of
+ * the exact request body, keyed with the app secret). Without this, anyone who
+ * knows the URL could post fake messages (including a fake "READY" from the
+ * kitchen number). Enforced whenever META_APP_SECRET is set.
+ */
+async function verifyMetaSignature(request) {
+  const secret = process.env.META_APP_SECRET;
+  if (!secret) {
+    console.warn('⚠️ META_APP_SECRET is not set — WhatsApp webhook signatures are NOT being verified.');
+    return true;
+  }
+  const header = request.headers.get('x-hub-signature-256') || '';
+  if (!header.startsWith('sha256=')) return false;
+  const provided = header.slice(7).toLowerCase();
+  const body = await request.clone().arrayBuffer();
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, body);
+  const expected = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+  if (expected.length !== provided.length) return false;
+  let diff = 0; // constant-time compare
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ provided.charCodeAt(i);
+  return diff === 0;
+}
+
 export default {
   async fetch(request) {
+    const { pathname } = new URL(request.url);
+    if (request.method === 'POST' && pathname.replace(/\/+$/, '') === '/api/webhook') {
+      if (!(await verifyMetaSignature(request))) {
+        console.error('🚫 Rejected WhatsApp webhook POST: missing/invalid X-Hub-Signature-256.');
+        return new Response('Invalid signature', { status: 401 });
+      }
+    }
     // httpServerHandler returns a fetch handler; adapt whether it is a bare
     // function or an object with a fetch method.
     if (typeof serverHandler === 'function') {

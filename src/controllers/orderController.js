@@ -61,7 +61,7 @@ router.post('/process-order', async (req, res) => {
       },
       system_metadata: {
         database_mode: db.isMock ? 'LOCAL_MOCK_JSON' : 'SUPABASE_POSTGRES',
-        ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_LLAMA_3_1_8B',
+        ai_engine_mode: cloudflareClient.isMock ? 'HEURISTIC_MOCK_NLP' : 'LIVE_CLOUDFLARE_WORKERS_AI',
         processed_at: new Date().toISOString()
       }
     };

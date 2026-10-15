@@ -388,6 +388,52 @@ async function processMerchantCommand({ from, client, text }) {
     return { handled: true, action: action, order: null, reply };
   }
 
+  // PRICE <item> <amount> — change a menu price without touching the database.
+  const priceMatch = trimmed.match(/^PRICE\s+(.+?)\s+₦?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*$/i);
+  if (priceMatch) {
+    const itemName = priceMatch[1].trim();
+    const newPrice = Number(priceMatch[2].replace(/,/g, ''));
+    const product = await db.getProductByName(itemName, clientId);
+    let reply;
+    if (!product) {
+      reply = `❌ Couldn't find "${itemName}" in your menu.`;
+    } else if (!(newPrice > 0) || newPrice > 10000000) {
+      reply = `❌ "${priceMatch[2]}" isn't a valid price.`;
+    } else {
+      const updated = await db.setProductPrice(product.id, newPrice, clientId);
+      reply = updated
+        ? `✅ "${product.name}" is now ₦${newPrice.toLocaleString('en-NG', { minimumFractionDigits: 2 })}.`
+        : `❌ Couldn't update "${product.name}". Please try again.`;
+    }
+    await whatsappService.sendTextMessage(from, reply);
+    return { handled: true, action: 'price', order: null, reply };
+  }
+
+  // INFO <text> — owner-written facts (hours, delivery areas/fees, payment)
+  // the bot may quote. "INFO" alone shows what is saved.
+  const infoMatch = trimmed.match(/^INFO(?:\s+([\s\S]+))?$/i);
+  if (infoMatch) {
+    const body = infoMatch[1] ? infoMatch[1].trim() : '';
+    let reply;
+    if (!body) {
+      reply = client.info_text
+        ? `ℹ️ Saved info:\n${client.info_text}\n\nTo change it: INFO <new text>  ·  To clear it: INFO CLEAR`
+        : `ℹ️ No info saved yet. Send: INFO <opening hours, delivery areas & fees, how customers pay, address>`;
+    } else if (/^clear$/i.test(body)) {
+      await db.setClientInfoText(clientId, null);
+      reply = `✅ Info cleared.`;
+    } else if (body.length > 600) {
+      reply = `❌ That's ${body.length} characters — please keep it under 600.`;
+    } else {
+      const saved = await db.setClientInfoText(clientId, body);
+      reply = saved
+        ? `✅ Saved. The bot will use this when customers ask about hours, delivery or payment.`
+        : `❌ Couldn't save that. Please try again.`;
+    }
+    await whatsappService.sendTextMessage(from, reply);
+    return { handled: true, action: 'info', order: null, reply };
+  }
+
   // CLOSED / OPEN — toggle accepting_orders. Note this must run BEFORE the
   // accepting_orders gate so an ops contact can reopen a closed restaurant.
   const openClose = trimmed.match(/^(CLOSED|OPEN)$/i);
@@ -687,6 +733,7 @@ async function tryAnswerQuestion(from, client, trimmedText, menu) {
       menu: (menu || [])
         .filter(m => m.is_available !== false)
         .map(m => ({ name: m.name, category: m.category, price: m.price })),
+      info: client.info_text || null,
       recent_order
     };
 
@@ -700,6 +747,118 @@ async function tryAnswerQuestion(from, client, trimmedText, menu) {
     console.error(`❌ tryAnswerQuestion failed (falling back): ${error.message}`);
     return false;
   }
+}
+
+const GREETING_RE = /^\s*(hi|hello|hey|hiya|howdy|yo|greetings|good\s+(morning|afternoon|evening))(\s+(there|ma|sir|boss|team))?\s*[!.,]*\s*$/i;
+const POST_CANCEL_RE = /^\s*(please\s+)?(i\s*(want|need|would like|'?d like)\s+to\s+)?cancel(\s+(my|the|that|this))?(\s+order)?(\s+please)?\s*[.!]*\s*$/i;
+
+/** Questions/menu requests must never be swallowed as an address or landmark. */
+function looksLikeQuestion(text) {
+  const t = String(text || '');
+  return t.includes('?') || QUESTION_START_RE.test(t) || isMenuRequest(t);
+}
+
+/**
+ * At free-text steps (delivery address / landmark) a question is answered
+ * (or honestly declined) and the step is re-asked, instead of the question
+ * being recorded as the address. Returns true when it handled the message.
+ */
+async function answerIfQuestionAtFreeTextStep(from, client, trimmedText, promptText) {
+  if (!trimmedText || !looksLikeQuestion(trimmedText)) return false;
+  const menu = await db.getClientMenu(client.id);
+  const answered = await tryAnswerQuestion(from, client, trimmedText, menu);
+  await whatsappService.sendTextMessage(from, answered ? promptText : `I'm not sure about that one. ${promptText}`);
+  return true;
+}
+
+const ADDRESS_WORDS_RE = /\b(road|rd|street|avenue|ave|crescent|close|lane|drive|estate|junction|opposite|behind|beside|plaza|church|mosque|school|hotel|filling station|bus stop|area|phase|layout|quarters|gra|extension)\b/gi;
+
+/**
+ * Conservative "this is a delivery address" check, used when someone types
+ * their address at the delivery/pickup question instead of tapping a button.
+ * Needs a house number plus an address word, or two address words.
+ */
+function looksLikeAddress(text) {
+  const t = String(text || '').trim();
+  if (t.length < 10 || looksLikeQuestion(t)) return false;
+  const words = (t.match(ADDRESS_WORDS_RE) || []).length;
+  return (/\d/.test(t) && words >= 1) || words >= 2;
+}
+
+function kitchenTargets(client) {
+  const ops = client.operations_contact_phone || null;
+  const targets = [];
+  if (ops) targets.push(ops);
+  if (client.kitchen_contact_phone && client.kitchen_contact_phone !== ops) targets.push(client.kitchen_contact_phone);
+  return targets;
+}
+
+/**
+ * Tell the kitchen a confirmed order was cancelled. Uses the optional
+ * KITCHEN_CANCEL_TEMPLATE (2 variables: {{1}} order id, {{2}} items) first
+ * when set, because plain text only reaches phones that messaged the bot in
+ * the last 24h. The NEW-ORDER template must never be reused for this.
+ */
+async function notifyKitchenCancel(client, order, itemsLine) {
+  const targets = kitchenTargets(client);
+  if (targets.length === 0) return { ok: false, via: 'no_kitchen_number' };
+  const shortId = String(order.id).slice(0, 8).toUpperCase();
+  const text = `❌ ORDER CANCELLED by the customer — #${shortId}\n${itemsLine}\nPlease do NOT prepare this order.`;
+  const templateName = process.env.KITCHEN_CANCEL_TEMPLATE;
+  for (const phone of targets) {
+    try {
+      if (templateName) {
+        const t = await whatsappService.sendTemplateMessage(
+          phone, templateName, process.env.KITCHEN_CANCEL_TEMPLATE_LANG || 'en', [shortId, itemsLine]
+        );
+        if (t && t.success === true) return { ok: true, via: `template:${phone}` };
+      }
+      const r = await whatsappService.sendTextMessage(phone, text);
+      if (r && r.success === true) return { ok: true, via: templateName ? `text:${phone}` : `text-unverified:${phone}` };
+    } catch (error) {
+      console.error(`❌ notifyKitchenCancel exception for ${phone}: ${error.message}`);
+    }
+  }
+  return { ok: false, via: 'all_routes_failed' };
+}
+
+/**
+ * Customer says "cancel my order" AFTER confirming (conversation is idle).
+ * Only an order the kitchen has not started ('approved') can be cancelled.
+ */
+async function handleCancelConfirmedOrder({ from, client }) {
+  const order = await db.getMostRecentOrderForCustomer(from, client.id);
+  const ACTIVE = ['approved', 'in_progress', 'ready_for_customer'];
+  const fresh = order && (Date.now() - new Date(order.created_at).getTime()) < 4 * 60 * 60 * 1000;
+  if (!order || !fresh || !ACTIVE.includes(order.status)) {
+    const reply = `I don't see an active order to cancel. Send me what you'd like to order anytime 😊`;
+    await whatsappService.sendTextMessage(from, reply);
+    return { handled: true, status: 'cancel_no_active_order', reply };
+  }
+  const shortId = String(order.id).slice(0, 8).toUpperCase();
+  if (order.status !== 'approved') {
+    const reply = order.status === 'ready_for_customer'
+      ? `Order #${shortId} is already ready, so it can't be cancelled here. Please contact the restaurant directly.`
+      : `Order #${shortId} is already being prepared, so it can't be cancelled here. Please contact the restaurant directly.`;
+    await whatsappService.sendTextMessage(from, reply);
+    return { handled: true, status: 'cancel_too_late', reply };
+  }
+
+  await db.updateOrderStatus(order.id, 'cancelled', client.id);
+  const lines = await db.getOrderItems(order.id, client.id);
+  const itemsLine = (lines || []).map(i => `${i.quantity}x ${i.product_name}`).join(', ') || 'items';
+  const kitchen = await notifyKitchenCancel(client, order, itemsLine);
+  console.log(`❌ Order ${order.id} cancelled by customer ${from}; kitchen notice: ${kitchen.ok ? `sent via ${kitchen.via}` : `FAILED (${kitchen.via})`}`);
+  if (!kitchen.ok) {
+    const msg = `🚨 CANCELLATION NOT DELIVERED — ${client.business_name || client.id}\nOrder #${shortId} (${itemsLine}) was cancelled by ${from}, but the kitchen could not be told. Please contact the restaurant.`;
+    console.error(msg.replace(/\n/g, ' | '));
+    if (process.env.ALERT_PHONE) {
+      try { await whatsappService.sendTextMessage(process.env.ALERT_PHONE, msg); } catch (e) { /* logged above */ }
+    }
+  }
+  const reply = `✅ Your order #${shortId} has been cancelled.` + (kitchen.ok ? ` The kitchen has been told.` : ` We're informing the kitchen now.`);
+  await whatsappService.sendTextMessage(from, reply);
+  return { handled: true, status: 'cancelled_after_confirm', reply };
 }
 
 // ---------------------------------------------------------------------------
@@ -727,6 +886,9 @@ async function handleRestaurantMessage({ from, client, conversation, messageType
   let state = conversation.state || 'idle';
   let pending = conversation.pending_order_data || {};
   const trimmedText = String(text || '').trim();
+
+  // A 👍 reaction to one of our messages is not a message — never answer it.
+  if (messageType === 'reaction') return { handled: true, status: 'ignored_reaction' };
 
   // --- Stale-state guard: an abandoned half-finished order expires, so a
   //     customer returning later starts clean instead of being stuck.
@@ -756,9 +918,15 @@ async function handleRestaurantMessage({ from, client, conversation, messageType
       return { handled: true, status: 'merchant_ignored_autoreply', detail: 'merchant_command' };
     }
     // Ops contact text that isn't a command is not a customer order: show help.
-    const help = `Ops commands: OUT <item> · IN <item> · CLOSED · OPEN · READY <order-id>`;
+    const help = `Ops commands: READY <order-id> · OUT <item> · IN <item> · PRICE <item> <amount> · INFO <text> · CLOSED · OPEN`;
     await whatsappService.sendTextMessage(from, help);
     return { handled: true, status: 'merchant_help', reply: help, detail: 'merchant_command' };
+  }
+
+  // --- "Cancel my order" after confirmation (conversation is idle by then).
+  //     Allowed even when the restaurant is closed.
+  if (state === 'idle' && POST_CANCEL_RE.test(trimmedText)) {
+    return handleCancelConfirmedOrder({ from, client });
   }
 
   // --- Not accepting orders gate: new orders get a polite decline. Orders
@@ -813,6 +981,22 @@ async function handleFreshOrder({ from, client, messageType, trimmedText }) {
   if (messageType === 'interactive' || messageType === 'location') {
     await whatsappService.sendTextMessage(from, `Please send your order as a message (e.g. "2 jollof rice, 1 chicken").`);
     return { handled: true, status: 'prompt_for_order' };
+  }
+
+  // No text at all (voice note, photo, sticker, ...): we can't read it.
+  if (!trimmedText) {
+    const reply = messageType === 'audio'
+      ? `🎙️ I can't listen to voice notes yet. Please type your order, e.g. "2 jollof rice, 1 chicken".`
+      : `I can only read text messages for now. Please type your order, e.g. "2 jollof rice, 1 chicken".`;
+    await whatsappService.sendTextMessage(from, reply);
+    return { handled: true, status: 'prompt_for_order_text', reply };
+  }
+
+  // A plain greeting gets a welcome + how to order, never an order parse.
+  if (GREETING_RE.test(trimmedText)) {
+    const reply = `👋 Welcome to ${client.business_name || 'our restaurant'}! Tell me what you'd like to order (e.g. "2 jollof rice, 1 chicken"), or type MENU to see what's available.`;
+    await whatsappService.sendTextMessage(from, reply);
+    return { handled: true, status: 'welcome', reply };
   }
 
   const menu = await db.getClientMenu(clientId);
@@ -1183,13 +1367,6 @@ async function advanceAfterConfirm(from, client, pending) {
   return { handled: true, status: 'awaiting_fulfillment' };
 }
 
-async function cancelRestaurantOrder(from, client) {
-  await db.clearConversationState(from);
-  const reply = `Order cancelled. Send a new order anytime.`;
-  await whatsappService.sendTextMessage(from, reply);
-  return { handled: true, status: 'cancelled', reply };
-}
-
 /**
  * Delivery/Pickup stage: button reply OR text ('delivery'/'pickup'). Then
  * route to location (delivery) or straight to finalize (pickup).
@@ -1229,6 +1406,16 @@ async function handleAwaitingFulfillment({ from, client, messageType, trimmedTex
           await db.clearConversationState(from);
           return handleFreshOrder({ from, client, messageType, trimmedText });
         }
+      }
+
+      // They typed their address instead of tapping "Delivery": that IS the
+      // answer — take it as delivery to that address.
+      const offeredNow = chooseFulfillment(client);
+      if (offeredNow.includes('delivery') && looksLikeAddress(trimmedText)) {
+        console.log(`📍 rest: ${from} typed an address at the fulfillment step — treating as DELIVERY.`);
+        pending.fulfillment = 'delivery';
+        pending.delivery_location = trimmedText;
+        return finalizeRestaurantOrder(from, client, pending);
       }
 
       const answered = await tryAnswerQuestion(from, client, trimmedText, qaMenu);
@@ -1289,6 +1476,13 @@ async function proceedAfterFulfillmentChoice({ from, client, pending }) {
 async function handleAwaitingLocation({ from, client, messageType, trimmedText, location, pending }) {
   const REPLY_NO_MATCH = `Please send your address as text or share your location pin.`;
 
+  // A question here ("how long will delivery take?") is NOT an address.
+  if (messageType !== 'location' && await answerIfQuestionAtFreeTextStep(
+    from, client, trimmedText, `Please send your delivery address as text, or share your location pin 📍`
+  )) {
+    return { handled: true, status: 'answered_question_at_location' };
+  }
+
   // Typed text address -> sufficient, proceed.
   if (messageType !== 'location' && trimmedText && messageType !== 'interactive') {
     pending.delivery_location = trimmedText;
@@ -1338,6 +1532,12 @@ async function handleAwaitingLandmark({ from, client, messageType, trimmedText, 
         ? [location.name, location.address].filter(Boolean).join(', ')
         : `Pin: ${location.latitude},${location.longitude}`;
     return finalizeRestaurantOrder(from, client, pending);
+  }
+
+  if (await answerIfQuestionAtFreeTextStep(
+    from, client, trimmedText, `Please send a landmark or house number so the rider can find you.`
+  )) {
+    return { handled: true, status: 'answered_question_at_landmark' };
   }
 
   if (trimmedText) {

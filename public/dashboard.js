@@ -38,6 +38,22 @@ function showToast(title, message, type = 'info') {
 }
 
 // ==========================================================================
+// Auth: internal API routes need the DASHBOARD_API_KEY (sent as x-api-key).
+// The key is asked for once per browser session and kept in sessionStorage.
+// ==========================================================================
+function authedFetch(url, opts = {}) {
+  let key = sessionStorage.getItem('dashboardKey');
+  if (!key) {
+    key = window.prompt('Enter the dashboard key') || '';
+    if (key) sessionStorage.setItem('dashboardKey', key);
+  }
+  return fetch(url, { ...opts, headers: { ...(opts.headers || {}), 'x-api-key': key } }).then(res => {
+    if (res.status === 401) sessionStorage.removeItem('dashboardKey');
+    return res;
+  });
+}
+
+// ==========================================================================
 // Fetch and Render Dashboard Data
 // ==========================================================================
 export async function fetchDashboardData() {
@@ -46,8 +62,8 @@ export async function fetchDashboardData() {
     
     // Concurrent GET requests
     const [ordersRes, suppliersRes] = await Promise.all([
-      fetch('/api/dashboard/orders'),
-      fetch('/api/dashboard/suppliers')
+      authedFetch('/api/dashboard/orders'),
+      authedFetch('/api/dashboard/suppliers')
     ]);
 
     if (!ordersRes.ok || !suppliersRes.ok) {
@@ -206,7 +222,7 @@ function renderSuppliers(suppliers) {
 // PUT Request to toggle the supplier's can_request_credit column
 async function updateSupplierCreditToggle(supplierId, canRequestCredit, supplierName) {
   try {
-    const response = await fetch(`/api/dashboard/suppliers/${supplierId}/credit-toggle`, {
+    const response = await authedFetch(`/api/dashboard/suppliers/${supplierId}/credit-toggle`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json'
@@ -352,7 +368,7 @@ async function setupSimulator() {
     `;
 
     try {
-      const response = await fetch('/api/process-order', {
+      const response = await authedFetch('/api/process-order', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
