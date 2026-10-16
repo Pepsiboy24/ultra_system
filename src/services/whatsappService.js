@@ -537,6 +537,27 @@ async function sendFulfillmentPrompt(to, body, { offers_delivery, offers_pickup 
 }
 
 /**
+ * Ask which name to put an order under. With a profile-name suggestion the
+ * customer just taps Yes / Change; without one we ask for a typed name.
+ * @param {string} to
+ * @param {string|null} candidate - cleaned WhatsApp profile name, if usable
+ * @returns {Promise<Object>}
+ */
+async function sendNamePrompt(to, candidate) {
+  if (candidate) {
+    return sendInteractiveButtons(
+      to,
+      `Should I put this order under *${candidate}*?`,
+      [
+        { id: 'name_yes', title: 'Yes' },
+        { id: 'name_change', title: 'Change' }
+      ]
+    );
+  }
+  return sendTextMessage(to, `What name should I put this order under? (for example: Amaka)`);
+}
+
+/**
  * Send a location request to a restaurant customer. The WhatsApp Cloud API has
  * no built-in "request location" message type (only location SHARING), so this
  * is a plain text prompt that accepts both a shared location pin and a typed
@@ -593,7 +614,7 @@ function buildRestaurantConfirmBody(pending) {
  * @param {string} params.etaRange - e.g. '20-25' minutes
  * @returns {string}
  */
-function buildRestaurantTicketMessage({ order, items, total_amount, etaRange }) {
+function buildRestaurantTicketMessage({ order, items, total_amount, etaRange, customerName }) {
   const shortId = String(order.id).slice(0, 8).toUpperCase();
   const typeLabel = order.order_type === 'pickup' ? 'PICKUP' : 'DELIVERY';
   const lines = [
@@ -602,6 +623,7 @@ function buildRestaurantTicketMessage({ order, items, total_amount, etaRange }) 
     `Total: ₦${Number(total_amount).toFixed(2)}`,
     `Type: ${typeLabel}`
   ];
+  if (customerName) lines.push(`Customer: ${customerName}`);
   if (order.order_type === 'delivery' && order.delivery_location) {
     lines.push(`Delivery: ${order.delivery_location}`);
   }
@@ -622,10 +644,12 @@ function buildRestaurantTicketMessage({ order, items, total_amount, etaRange }) 
  * @param {string} params.etaRange - e.g. '20-25' minutes
  * @returns {string}
  */
-function buildRestaurantEtaMessage({ order, items, total_amount, etaRange }) {
+function buildRestaurantEtaMessage({ order, items, total_amount, etaRange, customerName }) {
   const shortId = String(order.id).slice(0, 8).toUpperCase();
   return (
-    `✅ Order confirmed! (Order #${shortId})\n\n` +
+    `✅ Order confirmed! (Order #${shortId})\n` +
+    (customerName ? `👤 Order for ${customerName}\n` : '') +
+    `\n` +
     `${formatRestaurantItems(items)}\n\n` +
     `Total: ₦${Number(total_amount).toFixed(2)}\n` +
     `🕐 Ready in about ${etaRange} minutes.\n` +
@@ -801,6 +825,7 @@ function buildMenuNoMatchMessage(menu) {
 }
 
 module.exports = {
+  sendNamePrompt,
   sendTextMessage,
   sendTemplateMessage,
   sendInteractiveButtons,

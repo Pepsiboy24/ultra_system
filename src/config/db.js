@@ -349,25 +349,33 @@ const db = {
   /**
    * Create a new order record (scoped to a client via client_id).
    */
-  async createOrder({ client_id, supplier_id, status, status_reason = null, total_amount, payment_status = 'pending', payment_link = null, invoice_url = null, business_name = null, delivery_location = null, payment_terms = null, customer_phone = null, order_type = null }) {
+  async createOrder({ client_id, supplier_id, status, status_reason = null, total_amount, payment_status = 'pending', payment_link = null, invoice_url = null, business_name = null, delivery_location = null, payment_terms = null, customer_phone = null, order_type = null, customer_name = null }) {
     if (!isMock) {
-      const { data, error } = await supabase
-        .from('orders')
-        .insert([{
-          client_id,
-          supplier_id,
-          status,
-          status_reason,
-          total_amount,
-          payment_status,
-          //payment_link: provided via updateOrderPaymentLink after insert
-          business_name,
-          delivery_location,
-          payment_terms,
-          customer_phone,
-          order_type
-        }])
-        .select();
+      const row = {
+        client_id,
+        supplier_id,
+        status,
+        status_reason,
+        total_amount,
+        payment_status,
+        //payment_link: provided via updateOrderPaymentLink after insert
+        business_name,
+        delivery_location,
+        payment_terms,
+        customer_phone,
+        order_type
+      };
+      if (customer_name) row.customer_name = customer_name;
+
+      let { data, error } = await supabase.from('orders').insert([row]).select();
+
+      // Safety net: if migration 0005 has not been applied yet, the unknown
+      // column must NOT stop a customer's order. Retry once without the name.
+      if (error && customer_name && /customer_name/i.test(error.message || '')) {
+        console.error('⚠️ orders.customer_name column missing — run db/migrations/0005_customer_names.sql. Retrying without it.');
+        delete row.customer_name;
+        ({ data, error } = await supabase.from('orders').insert([row]).select());
+      }
 
       if (error) {
         throw new Error(`Failed to create order in Supabase: ${error.message}`);
@@ -388,6 +396,7 @@ const db = {
         payment_terms,
         customer_phone,
         order_type,
+        customer_name,
         created_at: new Date().toISOString()
       };
       
@@ -995,6 +1004,59 @@ async updateOrderInvoiceUrl(orderId, invoiceUrl, clientId = null) {
       }
       writeMockDb(data);
       return conv;
+    }
+  },
+
+  /**
+   * Saved customer name for (restaurant, phone). Returns null when unknown OR
+   * when the customers table does not exist yet (migration 0005 not applied) —
+   * never throws, so a missing table can never block an order.
+   */
+  async getCustomerName(clientId, customerPhone) {
+    if (!clientId || !customerPhone) return null;
+    if (!isMock) {
+      const { data, error } = await supabase
+        .from('customers')
+        .select('name')
+        .eq('client_id', clientId)
+        .eq('customer_phone', customerPhone)
+        .maybeSingle();
+      if (error) {
+        console.error('Error fetching customer name from Supabase:', error.message);
+        return null;
+      }
+      return data && data.name ? data.name : null;
+    } else {
+      const data = readMockDb();
+      const row = (data.customers || []).find(c => c.client_id === clientId && c.customer_phone === customerPhone);
+      return row ? row.name : null;
+    }
+  },
+
+  /**
+   * Save/update the customer's name for this restaurant. Best-effort: returns
+   * true/false and never throws.
+   */
+  async saveCustomerName(clientId, customerPhone, name) {
+    if (!clientId || !customerPhone || !name) return false;
+    const now = new Date().toISOString();
+    if (!isMock) {
+      const { error } = await supabase
+        .from('customers')
+        .upsert({ client_id: clientId, customer_phone: customerPhone, name, updated_at: now }, { onConflict: 'client_id,customer_phone' });
+      if (error) {
+        console.error('Error saving customer name to Supabase:', error.message);
+        return false;
+      }
+      return true;
+    } else {
+      const data = readMockDb();
+      data.customers = data.customers || [];
+      const row = data.customers.find(c => c.client_id === clientId && c.customer_phone === customerPhone);
+      if (row) { row.name = name; row.updated_at = now; }
+      else data.customers.push({ client_id: clientId, customer_phone: customerPhone, name, created_at: now, updated_at: now });
+      writeMockDb(data);
+      return true;
     }
   },
 

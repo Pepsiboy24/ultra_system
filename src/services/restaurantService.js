@@ -15,6 +15,9 @@
  *   r_awaiting_location   -> text address OR location pin (if pin only, the
  *                           customer is asked once for a landmark)
  *   r_awaiting_landmark   -> landmark/house number follow-up
+ *   r_awaiting_name       -> "Should I put this under <profile name>?" Yes/Change
+ *                           (skipped for returning customers: name is saved
+ *                           per restaurant + phone)
  *   -> order created + kitchen/ops notified + ETA sent to customer.
  *
  * Restaurant categories deliberately have NO payment step: the payment model
@@ -49,13 +52,15 @@ const STATE_AWAITING_FULFILLMENT = 'r_awaiting_fulfillment';
 const STATE_AWAITING_LOCATION = 'r_awaiting_location';
 const STATE_AWAITING_LANDMARK = 'r_awaiting_landmark';
 const STATE_RESOLVING_ITEMS = 'r_resolving_items';
+const STATE_AWAITING_NAME = 'r_awaiting_name';
 
 const MID_FLOW_STATES = [
   STATE_AWAITING_CONFIRM,
   STATE_AWAITING_FULFILLMENT,
   STATE_AWAITING_LOCATION,
   STATE_AWAITING_LANDMARK,
-  STATE_RESOLVING_ITEMS
+  STATE_RESOLVING_ITEMS,
+  STATE_AWAITING_NAME
 ];
 
 const FULFILLMENT_YES = ['yes', 'y', 'confirm', 'confirmed'];
@@ -471,12 +476,14 @@ async function notifyKitchen(client, pending, order, etaRange) {
   if (targets.length === 0) return { ok: false, via: 'no_kitchen_number' };
 
   const ticketText = whatsappService.buildRestaurantTicketMessage({
-    order, items: pending.items, total_amount: order.total_amount, etaRange: etaRange.string
+    order, items: pending.items, total_amount: order.total_amount, etaRange: etaRange.string,
+    customerName: pending.customer_name || null
   });
   const shortId = String(order.id).slice(0, 8).toUpperCase();
   const itemsLine = (pending.items || [])
     .map(i => `${i.quantity}x ${i.product_name || i.item_name}`).join(', ');
-  const typeLine = `${order.order_type === 'pickup' ? 'PICKUP' : 'DELIVERY'} · ETA ${etaRange.string} min`
+  const typeLine = (pending.customer_name ? `Customer ${pending.customer_name} · ` : '')
+    + `${order.order_type === 'pickup' ? 'PICKUP' : 'DELIVERY'} · ETA ${etaRange.string} min`
     + (order.order_type === 'delivery' && order.delivery_location ? ` · ${order.delivery_location}` : '');
 
   const templateName = process.env.KITCHEN_TICKET_TEMPLATE;
@@ -575,8 +582,15 @@ async function finalizeRestaurantOrder(customerPhone, client, pending) {
       business_name: pending.business_name || client.business_name || null,
       delivery_location: pending.delivery_location || null,
       customer_phone: customerPhone,
-      order_type: fulfillment
+      order_type: fulfillment,
+      customer_name: pending.customer_name || null
     });
+
+    // Remember the name for next time (best-effort; never blocks the order).
+    if (pending.customer_name) {
+      try { await db.saveCustomerName(clientId, customerPhone, pending.customer_name); }
+      catch (nameErr) { console.error(`⚠️ saveCustomerName failed: ${nameErr.message}`); }
+    }
 
     await db.createOrderItems(pending.items.map(item => ({
       order_id: order.id,
@@ -603,7 +617,8 @@ async function finalizeRestaurantOrder(customerPhone, client, pending) {
           order,
           items: pending.items,
           total_amount: order.total_amount,
-          etaRange: etaRange.string
+          etaRange: etaRange.string,
+          customerName: pending.customer_name || null
         })
       : `✅ We've received your order #${String(order.id).slice(0, 8).toUpperCase()}! ` +
         `We're confirming it with the kitchen right now and will message you shortly. Thank you for your patience 🙏`;
@@ -880,7 +895,7 @@ async function handleCancelConfirmedOrder({ from, client }) {
  * @param {Object|null} [params.location] - { latitude, longitude, name?, address? }
  * @returns {Promise<{ handled: true, status: string, reply?: string, detail?: string }>}
  */
-async function handleRestaurantMessage({ from, client, conversation, messageType, text, buttonReply, location }) {
+async function handleRestaurantMessage({ from, client, conversation, messageType, text, buttonReply, location, profileName }) {
   const clientId = client.id;
   conversation = conversation || { state: 'idle', pending_order_data: null };
   let state = conversation.state || 'idle';
@@ -901,6 +916,10 @@ async function handleRestaurantMessage({ from, client, conversation, messageType
       pending = {};
     }
   }
+
+  // WhatsApp's profile name travels with every message; keep it on the held
+  // order so the name step (which can run several messages later) can suggest it.
+  if (profileName && pending && typeof pending === 'object') pending.profile_name = String(profileName).slice(0, 80);
 
   // --- Merchant commands (ops contact only) — always allowed, even when the
   //     restaurant is closed (OPEN must work to reopen it).
@@ -927,6 +946,13 @@ async function handleRestaurantMessage({ from, client, conversation, messageType
   //     Allowed even when the restaurant is closed.
   if (state === 'idle' && POST_CANCEL_RE.test(trimmedText)) {
     return handleCancelConfirmedOrder({ from, client });
+  }
+
+  // --- "Change name": update the saved name used on future orders.
+  if (state === 'idle' && CHANGE_NAME_RE.test(trimmedText)) {
+    await db.setConversationState(from, STATE_AWAITING_NAME, { name_only: true, name_candidate: null });
+    await whatsappService.sendTextMessage(from, `Sure! What name should I use for your orders? (for example: Amaka)`);
+    return { handled: true, status: 'awaiting_new_name' };
   }
 
   // --- Not accepting orders gate: new orders get a polite decline. Orders
@@ -961,6 +987,9 @@ async function handleRestaurantMessage({ from, client, conversation, messageType
 
     case STATE_RESOLVING_ITEMS:
       return handleResolvingItems({ from, client, messageType, trimmedText, buttonReply, pending });
+
+    case STATE_AWAITING_NAME:
+      return handleAwaitingName({ from, client, messageType, trimmedText, buttonReply, pending });
 
     // idle (or unknown state): fresh order.
     default:
@@ -1347,7 +1376,7 @@ async function advanceAfterConfirm(from, client, pending) {
   if (offers.length === 0) {
     // Neither option offered — fall back to pickup so the order still completes.
     pending.fulfillment = 'pickup';
-    return finalizeRestaurantOrder(from, client, pending);
+    return proceedToNameOrFinalize(from, client, pending);
   }
 
   if (offers.length === 1) {
@@ -1415,7 +1444,7 @@ async function handleAwaitingFulfillment({ from, client, messageType, trimmedTex
         console.log(`📍 rest: ${from} typed an address at the fulfillment step — treating as DELIVERY.`);
         pending.fulfillment = 'delivery';
         pending.delivery_location = trimmedText;
-        return finalizeRestaurantOrder(from, client, pending);
+        return proceedToNameOrFinalize(from, client, pending);
       }
 
       const answered = await tryAnswerQuestion(from, client, trimmedText, qaMenu);
@@ -1465,7 +1494,7 @@ async function proceedAfterFulfillmentChoice({ from, client, pending }) {
     return { handled: true, status: 'awaiting_location', reply };
   }
 
-  return finalizeRestaurantOrder(from, client, pending);
+  return proceedToNameOrFinalize(from, client, pending);
 }
 
 /**
@@ -1486,7 +1515,7 @@ async function handleAwaitingLocation({ from, client, messageType, trimmedText, 
   // Typed text address -> sufficient, proceed.
   if (messageType !== 'location' && trimmedText && messageType !== 'interactive') {
     pending.delivery_location = trimmedText;
-    return finalizeRestaurantOrder(from, client, pending);
+    return proceedToNameOrFinalize(from, client, pending);
   }
 
   // Location pin.
@@ -1508,7 +1537,7 @@ async function handleAwaitingLocation({ from, client, messageType, trimmedText, 
       await whatsappService.sendTextMessage(from, reply);
       return { handled: true, status: 'awaiting_landmark', reply };
     }
-    return finalizeRestaurantOrder(from, client, pending);
+    return proceedToNameOrFinalize(from, client, pending);
   }
 
   const moved = await reDispatchIfStateMoved(
@@ -1531,7 +1560,7 @@ async function handleAwaitingLandmark({ from, client, messageType, trimmedText, 
       (location.name || location.address)
         ? [location.name, location.address].filter(Boolean).join(', ')
         : `Pin: ${location.latitude},${location.longitude}`;
-    return finalizeRestaurantOrder(from, client, pending);
+    return proceedToNameOrFinalize(from, client, pending);
   }
 
   if (await answerIfQuestionAtFreeTextStep(
@@ -1544,7 +1573,7 @@ async function handleAwaitingLandmark({ from, client, messageType, trimmedText, 
     pending.delivery_location = pending.delivery_location
       ? `${pending.delivery_location} — ${trimmedText}`
       : trimmedText;
-    return finalizeRestaurantOrder(from, client, pending);
+    return proceedToNameOrFinalize(from, client, pending);
   }
 
   const moved = await reDispatchIfStateMoved(
@@ -1556,6 +1585,139 @@ async function handleAwaitingLandmark({ from, client, messageType, trimmedText, 
   const reply = `Please send a landmark or house number for the delivery.`;
   await whatsappService.sendTextMessage(from, reply);
   return { handled: true, status: 're_prompt_landmark', reply };
+}
+
+
+// ---------------------------------------------------------------------------
+// Customer name step
+// ---------------------------------------------------------------------------
+
+const CHANGE_NAME_RE = /^\s*(please\s+)?(change|update|edit|correct)\s+(my\s+)?name\s*[.!]*\s*$/i;
+const NAME_YES_RE = /^\s*(yes|y|yeah|yep|yup|ok|okay|correct|right|sure|that'?s right|that is right)\s*[.!]*\s*$/i;
+const NAME_NO_RE = /^\s*(no|nope|n|change|wrong)\s*[.!]*\s*$/i;
+const MAX_NAME_LENGTH = 30;
+
+/**
+ * Clean a name for use on a kitchen ticket: keep letters (any alphabet),
+ * spaces, apostrophes, dots and hyphens; drop emojis, digits and symbols.
+ */
+function sanitizeName(raw) {
+  let s = String(raw || '').normalize('NFKC');
+  s = s.replace(/[^\p{L}\p{M}\s'.\-]/gu, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  if (s.length > MAX_NAME_LENGTH) s = s.slice(0, MAX_NAME_LENGTH).trim();
+  return s;
+}
+
+/** A usable name has at least 2 letters and at most 4 words. */
+function isPlausibleName(name) {
+  if (!name) return false;
+  const letters = (name.match(/\p{L}/gu) || []).length;
+  const words = name.split(' ').filter(Boolean).length;
+  return letters >= 2 && words <= 4;
+}
+
+/**
+ * Gate in front of finalize. Returning customers (name saved for this
+ * restaurant) skip straight through. New customers are asked once: a tap on
+ * "Yes" when their WhatsApp profile name is usable, otherwise a typed name.
+ */
+async function proceedToNameOrFinalize(from, client, pending) {
+  if (pending.customer_name) {
+    return finalizeRestaurantOrder(from, client, pending);
+  }
+
+  let saved = null;
+  try { saved = await db.getCustomerName(client.id, from); } catch (e) { saved = null; }
+  if (saved) {
+    console.log(`👤 rest: returning customer ${from} → "${saved}" (no name prompt).`);
+    pending.customer_name = saved;
+    return finalizeRestaurantOrder(from, client, pending);
+  }
+
+  const cleaned = sanitizeName(pending.profile_name);
+  const candidate = isPlausibleName(cleaned) ? cleaned : null;
+  pending.name_candidate = candidate;
+  await db.setConversationState(from, STATE_AWAITING_NAME, pending);
+  console.log(`👤 rest: asking ${from} for a name (suggestion: ${candidate || 'none'}).`);
+  await whatsappService.sendNamePrompt(from, candidate);
+  return { handled: true, status: 'awaiting_name' };
+}
+
+/**
+ * Name step. Accepts the Yes/Change buttons, "yes"/"no" text, or a typed
+ * name. In name_only mode ("change name" command) it just saves the name.
+ */
+async function handleAwaitingName({ from, client, messageType, trimmedText, buttonReply, pending }) {
+  const candidate = pending.name_candidate || null;
+  const askAgain = async (prefix) => {
+    if (candidate) {
+      await whatsappService.sendNamePrompt(from, candidate);
+    } else {
+      await whatsappService.sendTextMessage(from, `${prefix}What name should I put this order under? (for example: Amaka)`);
+    }
+    return { handled: true, status: 're_prompt_name' };
+  };
+
+  // Late/duplicate taps on earlier buttons (a double-tap on Pickup, say).
+  if (buttonReply && !['name_yes', 'name_change'].includes(buttonReply.id)) {
+    return { handled: true, status: 'ignored_stale_button' };
+  }
+
+  let name = null;
+
+  if (buttonReply && buttonReply.id === 'name_yes' && candidate) {
+    name = candidate;
+  } else if (buttonReply && buttonReply.id === 'name_change') {
+    pending.name_candidate = null;
+    await db.setConversationState(from, STATE_AWAITING_NAME, pending);
+    await whatsappService.sendTextMessage(from, `No problem — what name should I put it under? (for example: Amaka)`);
+    return { handled: true, status: 'awaiting_name_typed' };
+  } else if (trimmedText) {
+    if (candidate && NAME_YES_RE.test(trimmedText)) {
+      name = candidate;
+    } else if (candidate && NAME_NO_RE.test(trimmedText)) {
+      pending.name_candidate = null;
+      await db.setConversationState(from, STATE_AWAITING_NAME, pending);
+      await whatsappService.sendTextMessage(from, `No problem — what name should I put it under? (for example: Amaka)`);
+      return { handled: true, status: 'awaiting_name_typed' };
+    } else {
+      // A genuine question (not a short name like "Will") is answered, then re-asked.
+      const wordCount = trimmedText.split(/\s+/).length;
+      if (trimmedText.includes('?') || (wordCount >= 3 && looksLikeQuestion(trimmedText))) {
+        const menu = await db.getClientMenu(client.id);
+        const answered = await tryAnswerQuestion(from, client, trimmedText, menu);
+        await whatsappService.sendTextMessage(
+          from,
+          (answered ? '' : `I'm not sure about that one. `) +
+          (candidate ? `Should I put your order under *${candidate}*? Tap Yes, or type another name.` : `What name should I put this order under?`)
+        );
+        return { handled: true, status: 'answered_question_at_name' };
+      }
+
+      const typed = sanitizeName(trimmedText);
+      if (trimmedText.length <= 40 && isPlausibleName(typed)) {
+        name = typed;
+      } else {
+        return askAgain(`That doesn't look like a name. `);
+      }
+    }
+  } else {
+    return askAgain('');
+  }
+
+  // "change name" command: just save and confirm.
+  if (pending.name_only) {
+    await db.saveCustomerName(client.id, from, name);
+    await db.clearConversationState(from);
+    await whatsappService.sendTextMessage(from, `Done ✅ I'll use *${name}* for your orders.`);
+    return { handled: true, status: 'name_changed' };
+  }
+
+  pending.customer_name = name;
+  pending.name_candidate = null;
+  console.log(`👤 rest: ${from} → name "${name}".`);
+  return finalizeRestaurantOrder(from, client, pending);
 }
 
 module.exports = {
@@ -1571,6 +1733,9 @@ module.exports = {
   STATE_AWAITING_LOCATION,
   STATE_AWAITING_LANDMARK,
   STATE_RESOLVING_ITEMS,
+  STATE_AWAITING_NAME,
+  sanitizeName,
+  isPlausibleName,
   planOrderItems,
   matchResolutionReply,
   consolidateItem

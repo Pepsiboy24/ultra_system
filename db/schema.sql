@@ -136,6 +136,7 @@ CREATE TABLE orders (
     -- the customer "ready for pickup" vs "out for delivery". Never set for
     -- b2b/dropshipper orders.
     order_type TEXT CHECK (order_type IN ('delivery', 'pickup') OR order_type IS NULL),
+    customer_name TEXT,
     -- Dedup guard for the daily credit-reminder job: set to now() whenever a
     -- reminder is successfully sent. Milestones whose due date is <= this
     -- date are not re-sent, so re-running the job within the same day (or
@@ -192,6 +193,17 @@ CREATE TABLE leads (
 CREATE TABLE processed_messages (
     message_id TEXT PRIMARY KEY,
     processed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Saved customer names for the restaurant flow (one per restaurant + phone).
+CREATE TABLE customers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    customer_phone TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (client_id, customer_phone)
 );
 
 -- Indexes for performance & quick queries

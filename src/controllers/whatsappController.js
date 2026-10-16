@@ -113,6 +113,9 @@ router.post('/', async (req, res) => {
       ? message.interactive.button_reply
       : null;
     const location = message.location || null;
+    // WhatsApp sends the sender's profile name with every message (free). Used
+    // to suggest a name for restaurant orders; never trusted as identity.
+    const profileName = value?.contacts?.[0]?.profile?.name || null;
 
     console.log('==================================================');
     console.log(`📱 WHATSAPP MESSAGE RECEIVED FROM: ${from}`);
@@ -142,7 +145,8 @@ router.post('/', async (req, res) => {
         messageType,
         text: textBody,
         buttonReply,
-        location
+        location,
+        profileName
       });
       console.log(`🍽️ Restaurant flow [${rResult.status}] from ${from}.`);
       return res.status(200).json({
