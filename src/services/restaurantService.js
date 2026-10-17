@@ -480,12 +480,14 @@ async function notifyKitchen(client, pending, order, etaRange) {
 
   const ticketText = whatsappService.buildRestaurantTicketMessage({
     order, items: pending.items, total_amount: order.total_amount, etaRange: etaRange.string,
-    customerName: pending.customer_name || null
+    customerName: pending.customer_name || null,
+    addonTo: pending.addon_to || null
   });
   const shortId = String(order.id).slice(0, 8).toUpperCase();
   const itemsLine = (pending.items || [])
     .map(i => `${i.quantity}x ${i.product_name || i.item_name}`).join(', ');
-  const typeLine = (pending.customer_name ? `Customer ${pending.customer_name} · ` : '')
+  const typeLine = (pending.addon_to ? `ADD-ON to #${pending.addon_to} · ` : '')
+    + (pending.customer_name ? `Customer ${pending.customer_name} · ` : '')
     + `${order.order_type === 'pickup' ? 'PICKUP' : 'DELIVERY'} · ETA ${etaRange.string} min`
     + (order.order_type === 'delivery' && order.delivery_location ? ` · ${order.delivery_location}` : '');
 
@@ -621,7 +623,8 @@ async function finalizeRestaurantOrder(customerPhone, client, pending) {
           items: pending.items,
           total_amount: order.total_amount,
           etaRange: etaRange.string,
-          customerName: pending.customer_name || null
+          customerName: pending.customer_name || null,
+          addonTo: pending.addon_to || null
         })
       : `✅ We've received your order #${String(order.id).slice(0, 8).toUpperCase()}! ` +
         `We're confirming it with the kitchen right now and will message you shortly. Thank you for your patience 🙏`;
@@ -1024,6 +1027,24 @@ async function handleRestaurantMessage({ from, client, conversation, messageType
 }
 
 /**
+ * An order the customer has already placed that the kitchen is still working
+ * on (not ready yet, < 2h old) — the one an "add something" request refers to.
+ */
+async function getActiveOrderForAddOn(from, client) {
+  try {
+    const row = await db.getMostRecentOrderForCustomer(from, client.id);
+    if (!row || !['approved', 'in_progress'].includes(row.status)) return null;
+    if (Date.now() - new Date(row.created_at).getTime() > 2 * 60 * 60 * 1000) return null;
+    return { id: row.id, shortId: String(row.id).slice(0, 8).toUpperCase() };
+  } catch (e) { return null; }
+}
+
+// "can I add something to my order?" — no items named, so it is a request to
+// add, not an order. The bot cannot edit a placed order; it offers an add-on.
+const ADD_TO_PLACED_RE = /^\s*(?:(?:emm+|pls|please|abeg|ok|okay|hi|hello|hey)\s*,?\s*)*(?:(?:can|could|may)\s+i\s+(?:still\s+)?(?:add|include|put)(?:\s+(?:sth|something|more|another(?:\s+thing)?|anything(?:\s+else)?|extra|a\s+(?:thing|item)))?(?:\s+(?:more\s+)?to\s+(?:my|the|that|this)\s+order)?|(?:i\s+)?(?:want|wanna|would\s+like|need)\s+to\s+add(?:\s+(?:sth|something|more|another(?:\s+thing)?|anything|extra))?(?:\s+to\s+(?:my|the|that|this)\s+order)?|add\s+(?:sth|something|more|anything|extra)(?:\s+(?:more\s+)?to\s+(?:my|the|that|this)\s+order)?|add\s+to\s+(?:my|the|that|this)\s+order|i\s+(?:forgot|want)\s+to\s+add(?:\s+something)?)\s*[?.!]*\s*$/i;
+const ADDON_KEYWORD_RE = /^\s*(?:(?:emm+|pls|please|abeg|ok|okay|and|also)\s*,?\s*)*(?:add|include)\b/i;
+
+/**
  * Fresh order (idle): menu-based AI match (matched / ambiguous / no_match per
  * item), merge the matched items into a held order, then EITHER ask the
  * customer to resolve any ambiguous/no_match terms (r_resolving_items — Bug 1
@@ -1045,6 +1066,19 @@ async function handleFreshOrder({ from, client, messageType, trimmedText }) {
       : `I can only read text messages for now. Please type your order, e.g. "2 jollof rice, 1 chicken".`;
     await whatsappService.sendTextMessage(from, reply);
     return { handled: true, status: 'prompt_for_order_text', reply };
+  }
+
+  // "Can I add something to my order?" after the order is already with the
+  // kitchen: say so honestly (never promise an edit) and offer a linked add-on.
+  if (ADD_TO_PLACED_RE.test(trimmedText)) {
+    const active = await getActiveOrderForAddOn(from, client);
+    if (active) {
+      await db.setConversationState(from, 'idle', { addon_to: active.shortId, addon_t: Date.now() });
+      const reply = `Your order #${active.shortId} is already with the kitchen, so I can't change it from here. ` +
+        `But I can send them an add-on linked to it — just tell me what you'd like to add (e.g. "2 coke"). 😊`;
+      await whatsappService.sendTextMessage(from, reply);
+      return { handled: true, status: 'addon_offered', reply };
+    }
   }
 
   // A plain greeting gets a welcome + how to order, never an order parse.
@@ -1104,6 +1138,18 @@ async function handleFreshOrder({ from, client, messageType, trimmedText }) {
     delivery_location: null,
     location_pin: null
   };
+
+  // An add-on to an order the kitchen already has: "add 2 coke", or a plain
+  // item reply right after we offered an add-on. Linked on the ticket.
+  try {
+    const conv = await db.getConversationState(from);
+    const flagged = conv && conv.pending_order_data && conv.pending_order_data.addon_to
+      && Date.now() - Number(conv.pending_order_data.addon_t || 0) < 10 * 60 * 1000;
+    if (flagged || ADDON_KEYWORD_RE.test(trimmedText)) {
+      const active = await getActiveOrderForAddOn(from, client);
+      if (active) pending.addon_to = active.shortId;
+    }
+  } catch (e) { /* treat as a normal order */ }
 
   if (planned.unresolved.length > 0) {
     // Some terms need clarification/alternatives — hold the matched items and

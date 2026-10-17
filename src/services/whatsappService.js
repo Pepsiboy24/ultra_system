@@ -596,7 +596,9 @@ function formatRestaurantItems(items) {
  */
 function buildRestaurantConfirmBody(pending) {
   return (
-    `📋 Please confirm your order:\n\n` +
+    (pending.addon_to
+      ? `📋 Please confirm this add-on to your order #${pending.addon_to} (the kitchen gets it as a linked extra ticket):\n\n`
+      : `📋 Please confirm your order:\n\n`) +
     `${formatRestaurantItems(pending.items)}\n\n` +
     `Total: ${formatNaira(pending.total_amount)}`
   );
@@ -615,10 +617,11 @@ function buildRestaurantConfirmBody(pending) {
  * @param {string} params.etaRange - e.g. '20-25' minutes
  * @returns {string}
  */
-function buildRestaurantTicketMessage({ order, items, total_amount, etaRange, customerName }) {
+function buildRestaurantTicketMessage({ order, items, total_amount, etaRange, customerName, addonTo }) {
   const shortId = String(order.id).slice(0, 8).toUpperCase();
   const typeLabel = order.order_type === 'pickup' ? 'PICKUP' : 'DELIVERY';
   const lines = [
+    ...(addonTo ? [`➕ ADD-ON to order #${addonTo} — please prepare it together with that order.`] : []),
     `👨🍳 NEW ORDER #${shortId} (${order.id})`,
     `Please prepare the following:\n\n${formatRestaurantItems(items)}`,
     `Total: ${formatNaira(total_amount)}`,
@@ -645,10 +648,10 @@ function buildRestaurantTicketMessage({ order, items, total_amount, etaRange, cu
  * @param {string} params.etaRange - e.g. '20-25' minutes
  * @returns {string}
  */
-function buildRestaurantEtaMessage({ order, items, total_amount, etaRange, customerName }) {
+function buildRestaurantEtaMessage({ order, items, total_amount, etaRange, customerName, addonTo }) {
   const shortId = String(order.id).slice(0, 8).toUpperCase();
   return (
-    `✅ Order confirmed! (Order #${shortId})\n` +
+    (addonTo ? `✅ Add-on confirmed! (Order #${shortId}, added to your order #${addonTo})\n` : `✅ Order confirmed! (Order #${shortId})\n`) +
     (customerName ? `👤 Order for ${customerName}\n` : '') +
     `\n` +
     `${formatRestaurantItems(items)}\n\n` +
