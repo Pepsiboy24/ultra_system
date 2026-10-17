@@ -38,6 +38,7 @@
 
 const { formatNaira } = require('../utils/money');
 const { buildWelcome } = require('../utils/greeting');
+const { parseOrderEdit } = require('../utils/orderEdits');
 const db = require('../config/db');
 const aiService = require('./aiService');
 const whatsappService = require('./whatsappService');
@@ -1188,6 +1189,80 @@ async function askNextOrComplete(from, client, menu, pending) {
   return { handled: true, status: 'resolved_merged', detail: confirmPending.total_amount.toFixed(2) };
 }
 
+const MAX_QTY_PER_ITEM = 50;
+
+/** A short word that tells `name` apart from the other candidates (for example hints). */
+function distinctWord(name, others) {
+  const toks = String(name).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const otherToks = new Set(others.flatMap(o => String(o).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/)));
+  return toks.find(w => !otherToks.has(w)) || String(name);
+}
+
+/**
+ * Apply a parsed confirm-stage edit (see utils/orderEdits). Totals are always
+ * recomputed from catalogue unit prices already held in the order — the
+ * customer's words never set a price.
+ */
+async function applyOrderEdit({ from, pending, edit }) {
+  const items = (pending.items || []).map(i => ({ ...i }));
+  const body = () => whatsappService.buildRestaurantConfirmBody(pending);
+
+  if (edit.kind === 'notfound') {
+    await whatsappService.sendConfirmCancelPrompt(from, `🤔 I don't see "${edit.target}" in your order.\n\n${body()}`);
+    return { handled: true, status: 'order_edit_not_found' };
+  }
+
+  if (edit.kind === 'ask') {
+    const names = edit.candidates.map(i => items[i].product_name);
+    const lines = edit.candidates.map(i => `• ${items[i].product_name} (×${items[i].quantity})`).join('\n');
+    const question = edit.verb === 'remove' ? 'Which one should I remove?'
+      : edit.verb === 'set' ? `Which one should I change to ${edit.qty}?`
+      : `Which one should I add ${edit.qty} more of?`;
+    const w = distinctWord(names[0], names.slice(1));
+    const example = edit.verb === 'remove' ? `remove the ${w}`
+      : edit.verb === 'set' ? `make the ${w} ${edit.qty}`
+      : `add ${edit.qty} more ${w}`;
+    await whatsappService.sendTextMessage(from, `${question}\n\n${lines}\n\nJust tell me which, e.g. "${example}".`);
+    return { handled: true, status: 'order_edit_clarify' };
+  }
+
+  const item = items[edit.index];
+  let note;
+  if (edit.kind === 'remove') {
+    const left = edit.qty !== null ? item.quantity - edit.qty : 0;
+    if (left > 0) {
+      item.quantity = left;
+      item.item_total = parseFloat((item.unit_price * left).toFixed(2));
+      note = `Removed ${edit.qty} — ${item.product_name} is now ×${left}.`;
+    } else {
+      items.splice(edit.index, 1);
+      note = `Removed ${item.product_name}.`;
+    }
+  } else {
+    const newQty = edit.kind === 'add' ? item.quantity + edit.qty : edit.qty;
+    if (newQty > MAX_QTY_PER_ITEM) {
+      await whatsappService.sendTextMessage(from, `That's more than I can take in one order here — for ${newQty}× ${item.product_name}, please contact the restaurant directly. You can still adjust your order (or Confirm / Cancel above).`);
+      return { handled: true, status: 'order_edit_too_large' };
+    }
+    item.quantity = newQty;
+    item.item_total = parseFloat((item.unit_price * newQty).toFixed(2));
+    note = edit.kind === 'add'
+      ? `Added ${edit.qty} more — ${item.product_name} is now ×${newQty}.`
+      : `Updated — ${item.product_name} is now ×${newQty}.`;
+  }
+
+  if (items.length === 0) {
+    await whatsappService.sendTextMessage(from, `That would leave your order empty. Type CANCEL to cancel the order, or tell me what you'd like instead.`);
+    return { handled: true, status: 'order_edit_would_empty' };
+  }
+
+  pending.items = items;
+  pending.total_amount = recomputeTotal(items);
+  await db.setConversationState(from, STATE_AWAITING_CONFIRM, pending);
+  await whatsappService.sendConfirmCancelPrompt(from, `✅ ${note}\n\n${whatsappService.buildRestaurantConfirmBody(pending)}`);
+  return { handled: true, status: 'order_edited', detail: edit.kind };
+}
+
 /**
  * Confirm/Cancel stage: button reply OR plain text ('yes'/'confirm' /
  * 'no'/'cancel' — users type instead of tapping).
@@ -1207,6 +1282,14 @@ async function handleAwaitingConfirm({ from, client, messageType, trimmedText, b
   const intent = classifyConfirmReply(trimmedText);
   if (intent === 'yes') return advanceAfterConfirm(from, client, pending);
   if (intent === 'no') return cancelRestaurantOrder(from, client);
+
+  // Order edits ("remove the chicken", "make it 3", "add one more") are matched
+  // deterministically against the items already held — BEFORE any AI parsing,
+  // which would otherwise read "remove the chicken" as a request to add chicken.
+  if (trimmedText) {
+    const edit = parseOrderEdit(trimmedText, pending.items || []);
+    if (edit) return applyOrderEdit({ from, pending, edit });
+  }
 
   // A real message at confirm stage that isn't a confirmation: treat mentions
   // of dishes as order modifications and route them through menu-based
