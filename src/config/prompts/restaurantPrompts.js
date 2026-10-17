@@ -1,3 +1,4 @@
+const { formatNaira } = require('../../utils/money');
 /**
  * Restaurant business-category extraction prompt.
  *
@@ -137,7 +138,7 @@ Return JSON matching this exact structure, and nothing else:
  */
 function buildQAPrompt(context, message) {
   const menuLines = (context.menu || [])
-    .map(m => `- ${m.name}${m.category ? ` (${m.category})` : ''}: ₦${Number(m.price).toFixed(2)}`)
+    .map(m => `- ${m.name}${m.category ? ` (${m.category})` : ''}: ${formatNaira(m.price)}`)
     .join('\n') || '(menu unavailable)';
 
   const ro = context.recent_order;
@@ -148,6 +149,12 @@ function buildQAPrompt(context, message) {
       (ro.is_ready ? '' : ro.eta_range ? `- Current estimate: ${ro.eta_range} minutes from now\n` : '')
     : `\nThe customer has no recent order with us right now.\n`;
 
+  const hist = Array.isArray(context.history) ? context.history : [];
+  const historyBlock = hist.length
+    ? `Recent conversation (oldest first) — use it ONLY to work out what a short follow-up refers to (e.g. "and the chicken?"). It is NOT a source of facts; facts come only from the list above:\n` +
+      hist.map(t => `Customer: ${JSON.stringify(String(t.q))}\nYou: ${JSON.stringify(String(t.a))}`).join('\n') + '\n\n'
+    : '';
+
   return `You are a helpful assistant for "${context.business_name}", a restaurant that takes orders over WhatsApp. The customer just sent a message that did NOT look like a food order. Decide whether you can confidently answer it using ONLY the facts below — never guess or invent anything not listed here.
 
 Known facts (this is ALL you know — nothing else):
@@ -157,7 +164,7 @@ Known facts (this is ALL you know — nothing else):
 - Menu (available items only):
 ${menuLines}
 ${context.info ? `\nInformation written by the restaurant owner (you may quote this for questions about opening hours, delivery areas or fees, payment, or address — and ONLY this):\n${context.info}\n` : ''}${recentOrderBlock}
-Customer's message:
+${historyBlock}Customer's message:
 ${JSON.stringify(String(message))}
 
 Rules:

@@ -1,3 +1,4 @@
+const { formatNaira } = require('../utils/money');
 /**
  * WhatsApp Outbound Messaging Service
  *
@@ -174,7 +175,7 @@ function buildPendingConfirmationMessage(pendingOrder, businessCategory) {
   return (
     `📋 Please confirm your order:\n\n` +
     `${formatPendingItems(pendingOrder, category)}\n\n` +
-    `Total: ₦${Number(pendingOrder.total_amount).toFixed(2)}\n` +
+    `Total: ${formatNaira(pendingOrder.total_amount)}\n` +
     `Reply YES to confirm or NO to cancel.`
   );
 }
@@ -206,7 +207,7 @@ function buildOpsTicketMessage({ order, supplier_name, items, total_amount, deli
     ``,
     `Supplier: ${supplier_name}`,
     `Items:\n${itemLines}`,
-    `Total: ₦${Number(total_amount).toFixed(2)}`
+    `Total: ${formatNaira(total_amount)}`
   ];
 
   if (delivery_location) {
@@ -250,7 +251,7 @@ function buildKitchenTicketMessage({ order, items, total_amount, order_type }) {
     `New order received.\n\n` +
     `Items:\n${itemLines}\n\n` +
     `Type: ${typeLabel}\n` +
-    `Total: ₦${Number(total_amount).toFixed(2)}`
+    `Total: ${formatNaira(total_amount)}`
   );
 }
 
@@ -275,7 +276,7 @@ function buildStockOutMessage({ failedProductName, alternatives }) {
     lines.push(
       ``,
       `You might like one of these instead:`,
-      ...alts.map(a => `• ${a.name} — ₦${Number(a.price).toFixed(2)}`)
+      ...alts.map(a => `• ${a.name} — ${formatNaira(a.price)}`)
     );
   } else {
     lines.push(``, `Please speak to the restaurant for an alternative.`);
@@ -300,7 +301,7 @@ function buildOrderReplyMessage(pipelineResult) {
     return (
       `✅ Order confirmed!\n\n` +
       `${itemLines}\n\n` +
-      `Total: ₦${Number(order.total_amount).toFixed(2)}\n` +
+      `Total: ${formatNaira(order.total_amount)}\n` +
       `Order ID: ${order.id}\n` +
       (order.invoice_url ? `🧾 Invoice: ${order.invoice_url}\n` : '') +
       (order.payment_link ? `Pay here: ${order.payment_link}` : '')
@@ -330,7 +331,7 @@ function buildPaymentConfirmationMessage({ orderId, total_amount, paymentMethod 
   return (
     `💳 Payment received!\n\n` +
     `Order #${String(orderId).slice(0, 8).toUpperCase()}\n` +
-    `Amount paid: ₦${Number(total_amount).toFixed(2)}\n` +
+    `Amount paid: ${formatNaira(total_amount)}\n` +
     `Method: ${paymentMethod ? paymentMethod.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : 'Card / Transfer'}\n\n` +
     `Thank you — your order is confirmed.`
   );
@@ -365,7 +366,7 @@ function buildSupplierRequestMessage({ order, supplier_name, items, total_amount
     ``,
     `Supplier: ${supplier_name}`,
     `Items:\n${itemLines}`,
-    `Total: ₦${Number(total_amount).toFixed(2)}`
+    `Total: ${formatNaira(total_amount)}`
   ];
 
   if (delivery_location) {
@@ -391,7 +392,7 @@ function buildSellerReadyPrompt({ order, supplier_name, total_amount }) {
   return (
     `📦 Order #${shortId} (${order.id})\n` +
     `Supplier: ${supplier_name}\n` +
-    `Total: ₦${Number(total_amount).toFixed(2)}\n\n` +
+    `Total: ${formatNaira(total_amount)}\n\n` +
     `Supplier confirmed this order. Reply PROGRESS ${shortId} once it starts being prepared, ` +
     `or READY ${shortId} when it's ready for the customer.`
   );
@@ -411,7 +412,7 @@ function buildOrderReadyMessage({ orderId, total_amount, payment_link }) {
   return (
     `🎉 Your order is ready!\n\n` +
     `Order #${String(orderId).slice(0, 8).toUpperCase()}\n` +
-    `Total: ₦${Number(total_amount).toFixed(2)}\n` +
+    `Total: ${formatNaira(total_amount)}\n` +
     (payment_link ? `Pay here: ${payment_link}` : '')
   );
 }
@@ -597,7 +598,7 @@ function buildRestaurantConfirmBody(pending) {
   return (
     `📋 Please confirm your order:\n\n` +
     `${formatRestaurantItems(pending.items)}\n\n` +
-    `Total: ₦${Number(pending.total_amount).toFixed(2)}`
+    `Total: ${formatNaira(pending.total_amount)}`
   );
 }
 
@@ -620,7 +621,7 @@ function buildRestaurantTicketMessage({ order, items, total_amount, etaRange, cu
   const lines = [
     `👨🍳 NEW ORDER #${shortId} (${order.id})`,
     `Please prepare the following:\n\n${formatRestaurantItems(items)}`,
-    `Total: ₦${Number(total_amount).toFixed(2)}`,
+    `Total: ${formatNaira(total_amount)}`,
     `Type: ${typeLabel}`
   ];
   if (customerName) lines.push(`Customer: ${customerName}`);
@@ -651,7 +652,7 @@ function buildRestaurantEtaMessage({ order, items, total_amount, etaRange, custo
     (customerName ? `👤 Order for ${customerName}\n` : '') +
     `\n` +
     `${formatRestaurantItems(items)}\n\n` +
-    `Total: ₦${Number(total_amount).toFixed(2)}\n` +
+    `Total: ${formatNaira(total_amount)}\n` +
     `🕐 Ready in about ${etaRange} minutes.\n` +
     (order.order_type === 'delivery'
       ? `🛵 Your order is on the way to you.\n`
@@ -730,7 +731,7 @@ function buildUnresolvedAsk({ heldItems, unresolved }) {
     ? `📝 Here's what we have so far:\n${formatRestaurantItems(heldItems)}\n\n`
     : '';
   const options = (unresolved.options || [])
-    .map((o, i) => `${i + 1}. ${o.name} — ₦${Number(o.price).toFixed(2)}`)
+    .map((o, i) => `${i + 1}. ${o.name} — ${formatNaira(o.price)}`)
     .join('\n');
   const guidance = `\n\nTip: tap an option below, or type the dish you'd like.`;
   if (unresolved.kind === 'no_match') {
@@ -794,7 +795,7 @@ function buildConfirmReaskWithContext(pending) {
   return (
     `📋 Here's your order again:\n\n` +
     `${formatRestaurantItems(pending.items)}\n\n` +
-    `Total: ₦${Number(pending.total_amount).toFixed(2)}\n\n` +
+    `Total: ${formatNaira(pending.total_amount)}\n\n` +
     `Reply YES to confirm or NO to cancel.`
   );
 }
@@ -818,7 +819,7 @@ function buildMenuNoMatchMessage(menu) {
   const examples = (menu || [])
     .filter(m => m.is_available !== false)
     .slice(0, 4)
-    .map(m => `• ${m.name} — ₦${Number(m.price).toFixed(2)}`)
+    .map(m => `• ${m.name} — ${formatNaira(m.price)}`)
     .join('\n');
   const suffix = examples ? `\n\nSome of our dishes:\n${examples}` : '';
   return `❌ Sorry, we couldn't match that to our menu. Please order something from it.${suffix}`;

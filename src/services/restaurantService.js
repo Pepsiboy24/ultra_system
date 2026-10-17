@@ -36,6 +36,8 @@
  * order data is snapshotted in conversations.pending_order_data.
  */
 
+const { formatNaira } = require('../utils/money');
+const { buildWelcome } = require('../utils/greeting');
 const db = require('../config/db');
 const aiService = require('./aiService');
 const whatsappService = require('./whatsappService');
@@ -407,7 +409,7 @@ async function processMerchantCommand({ from, client, text }) {
     } else {
       const updated = await db.setProductPrice(product.id, newPrice, clientId);
       reply = updated
-        ? `✅ "${product.name}" is now ₦${newPrice.toLocaleString('en-NG', { minimumFractionDigits: 2 })}.`
+        ? `✅ "${product.name}" is now ${formatNaira(newPrice)}.`
         : `❌ Couldn't update "${product.name}". Please try again.`;
     }
     await whatsappService.sendTextMessage(from, reply);
@@ -498,7 +500,7 @@ async function notifyKitchen(client, pending, order, etaRange) {
       if (templateName) {
         const tResult = await whatsappService.sendTemplateMessage(
           phone, templateName, templateLang,
-          [shortId, itemsLine, `₦${Number(order.total_amount).toFixed(2)}`, typeLine]
+          [shortId, itemsLine, `${formatNaira(order.total_amount)}`, typeLine]
         );
         if (tResult && tResult.success === true) return { ok: true, via: `template:${phone}` };
       }
@@ -521,7 +523,7 @@ async function alertOperator(client, order, customerPhone, pending, reason) {
   const shortId = String(order.id).slice(0, 8).toUpperCase();
   const msg = `🚨 KITCHEN NOT REACHED — ${client.business_name || client.id}\n` +
     `Order #${shortId} · ${(pending.items || []).map(i => `${i.quantity}x ${i.product_name || i.item_name}`).join(', ')}\n` +
-    `Total ₦${Number(order.total_amount).toFixed(2)} · ${order.order_type}\n` +
+    `Total ${formatNaira(order.total_amount)} · ${order.order_type}\n` +
     `Customer: ${customerPhone}\nReason: ${reason}\nPlease contact the restaurant now.`;
   console.error(`🚨 ${msg.replace(/\n/g, ' | ')}`);
   const alertPhone = process.env.ALERT_PHONE;
@@ -532,7 +534,7 @@ async function alertOperator(client, order, customerPhone, pending, reason) {
     if (templateName) {
       const t = await whatsappService.sendTemplateMessage(alertPhone, templateName,
         process.env.KITCHEN_TICKET_TEMPLATE_LANG || 'en',
-        [shortId, `KITCHEN NOT REACHED: ${client.business_name || ''} / customer ${customerPhone}`, `₦${Number(order.total_amount).toFixed(2)}`, reason]);
+        [shortId, `KITCHEN NOT REACHED: ${client.business_name || ''} / customer ${customerPhone}`, `${formatNaira(order.total_amount)}`, reason]);
       sent = !!(t && t.success === true);
     }
     if (!sent) await whatsappService.sendTextMessage(alertPhone, msg);
@@ -691,7 +693,7 @@ function buildFullMenuMessage(menu) {
   for (const m of items.slice(0, 40)) {
     const cat = m.category || 'Menu';
     if (!groups.has(cat)) groups.set(cat, []);
-    groups.get(cat).push(`• ${m.name} — ₦${Number(m.price).toFixed(2)}`);
+    groups.get(cat).push(`• ${m.name} — ${formatNaira(m.price)}`);
   }
   const body = [...groups.entries()].map(([cat, lines]) => `*${cat}*\n${lines.join('\n')}`).join('\n\n');
   return `🍽️ Here's our menu:\n\n${body}\n\nJust tell me what you'd like to order!`;
@@ -704,6 +706,9 @@ function buildFullMenuMessage(menu) {
  * was sent; false means the caller should use its existing fallback.
  * Never throws.
  */
+const QA_HISTORY_MAX_TURNS = 3;
+const QA_HISTORY_MAX_AGE_MS = 10 * 60 * 1000;
+
 async function tryAnswerQuestion(from, client, trimmedText, menu) {
   try {
     if (!trimmedText) return false;
@@ -749,12 +754,32 @@ async function tryAnswerQuestion(from, client, trimmedText, menu) {
         .filter(m => m.is_available !== false)
         .map(m => ({ name: m.name, category: m.category, price: m.price })),
       info: client.info_text || null,
-      recent_order
+      recent_order,
+      history: []
     };
+
+    // Short-term memory: the last few Q&A turns (≤10 min old) so a follow-up
+    // like "and the chicken?" can be understood. Wording context only — never a fact source.
+    let convo = null;
+    try {
+      convo = await db.getConversationState(from);
+      const turns = Array.isArray(convo?.pending_order_data?.qa_history) ? convo.pending_order_data.qa_history : [];
+      context.history = turns
+        .filter(t => t && t.q && t.a && Date.now() - Number(t.t || 0) < QA_HISTORY_MAX_AGE_MS)
+        .slice(-QA_HISTORY_MAX_TURNS)
+        .map(t => ({ q: t.q, a: t.a }));
+    } catch (e) { /* no memory this time */ }
 
     const result = await aiService.answerRestaurantQuestion(trimmedText, context);
     if (result && result.is_question === true && result.answer) {
       await whatsappService.sendTextMessage(from, result.answer);
+      try {
+        const base = (convo && convo.pending_order_data) || {};
+        const kept = (Array.isArray(base.qa_history) ? base.qa_history : [])
+          .filter(t => t && Date.now() - Number(t.t || 0) < QA_HISTORY_MAX_AGE_MS);
+        kept.push({ q: String(trimmedText).slice(0, 200), a: String(result.answer).slice(0, 300), t: Date.now() });
+        await db.setConversationState(from, (convo && convo.state) || 'idle', { ...base, qa_history: kept.slice(-QA_HISTORY_MAX_TURNS) });
+      } catch (e) { console.error(`❌ saving Q&A history failed (ignored): ${e.message}`); }
       return true;
     }
     return false;
@@ -1023,7 +1048,9 @@ async function handleFreshOrder({ from, client, messageType, trimmedText }) {
 
   // A plain greeting gets a welcome + how to order, never an order parse.
   if (GREETING_RE.test(trimmedText)) {
-    const reply = `👋 Welcome to ${client.business_name || 'our restaurant'}! Tell me what you'd like to order (e.g. "2 jollof rice, 1 chicken"), or type MENU to see what's available.`;
+    let savedName = null;
+    try { savedName = await db.getCustomerName(client.id, from); } catch (e) { /* greet without a name */ }
+    const reply = buildWelcome({ businessName: client.business_name, customerName: savedName, text: trimmedText });
     await whatsappService.sendTextMessage(from, reply);
     return { handled: true, status: 'welcome', reply };
   }
