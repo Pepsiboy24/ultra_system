@@ -1208,6 +1208,7 @@ async function applyOrderEdit({ from, pending, edit }) {
   const body = () => whatsappService.buildRestaurantConfirmBody(pending);
 
   if (edit.kind === 'notfound') {
+    await db.setConversationState(from, STATE_AWAITING_CONFIRM, pending);
     await whatsappService.sendConfirmCancelPrompt(from, `🤔 I don't see "${edit.target}" in your order.\n\n${body()}`);
     return { handled: true, status: 'order_edit_not_found' };
   }
@@ -1534,16 +1535,39 @@ async function handleAwaitingFulfillment({ from, client, messageType, trimmedTex
     if (trimmedText) {
       const qaMenu = await db.getClientMenu(client.id);
 
-      // Off-script but clearly a NEW order ("I'd like to order rice"): drop
-      // the half-finished one and start over instead of re-asking forever.
+      // Off-script text that is clearly about the ORDER ("add coke", "remove the
+      // chicken", "make it 3"): change the held order — NEVER throw it away.
+      // The customer is then taken back to the confirm step to re-confirm.
       if (!isMenuRequest(trimmedText) && !trimmedText.includes('?')) {
-        let freshParse = null;
-        try { freshParse = await aiService.parseRestaurantMenuOrder(trimmedText, qaMenu); } catch (e) { freshParse = null; }
-        const freshTerms = freshParse && Array.isArray(freshParse.items) ? freshParse.items : [];
-        if (freshTerms.some(t => t.outcome === 'matched')) {
-          console.log(`♻️ rest: new order text at fulfillment step for ${from} — restarting.`);
-          await db.clearConversationState(from);
-          return handleFreshOrder({ from, client, messageType, trimmedText });
+        // 1) Deterministic edits (utils/orderEdits).
+        const edit = parseOrderEdit(trimmedText, pending.items || []);
+        if (edit) return applyOrderEdit({ from, pending, edit });
+
+        // 2) Menu items mentioned: ADD them to what is already held.
+        let parsedAtStep = null;
+        try { parsedAtStep = await aiService.parseRestaurantMenuOrder(trimmedText, qaMenu); } catch (e) { parsedAtStep = null; }
+        const termsAtStep = parsedAtStep && Array.isArray(parsedAtStep.items) ? parsedAtStep.items : [];
+        if (termsAtStep.some(t => t.outcome === 'matched')) {
+          console.log(`➕ rest: order text at fulfillment step for ${from} — adding to the held order.`);
+          const before = pending.items || [];
+          const planned = planOrderItems(before, termsAtStep, qaMenu);
+          pending.items = planned.items;
+          pending.total_amount = recomputeTotal(planned.items);
+          pending.fulfillment = null;
+          if (planned.unresolved.length > 0) {
+            pending.unresolved = planned.unresolved;
+            pending.resolving_index = 0;
+            await db.setConversationState(from, STATE_RESOLVING_ITEMS, pending);
+            await askForUnresolved(from, client, qaMenu, pending);
+          } else {
+            const added = itemsDelta(before, planned.items).map(a => `${a.quantity}× ${a.product_name}`).join(', ');
+            await db.setConversationState(from, STATE_AWAITING_CONFIRM, pending);
+            await whatsappService.sendConfirmCancelPrompt(
+              from,
+              `✅ ${added ? `Added ${added}.` : 'Updated your order.'}\n\n${whatsappService.buildRestaurantConfirmBody(pending)}`
+            );
+          }
+          return { handled: true, status: 'modification_at_fulfillment' };
         }
       }
 
